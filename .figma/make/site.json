@@ -1,0 +1,11 @@
+{
+  "title": "PyroFlow Fireworks POS",
+  "description": "A role-based POS and business management system for fireworks shops to process sales, track inventory, manage staff, and forecast demand.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
