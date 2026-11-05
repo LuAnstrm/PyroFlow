@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react"
 import { Bell, Check, ChevronRight, CircleCheck, CircleX, CircleDollarSign, Flame, LogOut, ReceiptText, UserCog } from "lucide-react"
 import { api, fmtDateTime, money, useApp, useFetch, type PageParams, type Sale, type Settings as SettingsMap } from "../lib"
-import { Avatar, Badge, Button, Card, CardHead, Field, FormError, FormGroup, PageIntro, Receipt } from "../ui"
+import { Avatar, Badge, Button, Card, CardHead, Field, FormError, FormGroup, PageIntro, Receipt, ROLE_TONE } from "../ui"
 
 const SECTIONS = [
-  { id: "shop", label: "Business details", icon: Flame, manager: true },
-  { id: "receipt", label: "Receipts", icon: ReceiptText, manager: true },
-  { id: "tax", label: "Tax", icon: CircleDollarSign, manager: true },
-  { id: "alerts", label: "Inventory alerts", icon: Bell, manager: true },
-  { id: "account", label: "My account", icon: UserCog, manager: false },
+  { id: "shop", label: "Business details", icon: Flame, adminOnly: true },
+  { id: "receipt", label: "Receipts", icon: ReceiptText, adminOnly: true },
+  { id: "tax", label: "Tax", icon: CircleDollarSign, adminOnly: true },
+  { id: "alerts", label: "Inventory alerts", icon: Bell, adminOnly: true },
+  { id: "account", label: "My account", icon: UserCog, adminOnly: false },
 ]
 
 const SAMPLE_SALE: Sale = {
@@ -59,7 +59,8 @@ function Toggle({ title, help, checked, onChange }: { title: string; help: strin
 }
 
 function MyAccount() {
-  const { user, setUser, toast, logout } = useApp()
+  const { user, setUser, toast, logout, settings } = useApp()
+  const passwordMin = Number(settings.security_password_min) || 8
   const [name, setName] = useState(user.name)
   const [current, setCurrent] = useState("")
   const [next, setNext] = useState("")
@@ -98,7 +99,7 @@ function MyAccount() {
         <div>
           <h3>{user.name}</h3>
           <p>
-            @{user.username} · <Badge tone={user.role === "Administrator" ? "danger" : user.role === "Owner" ? "warning" : "info"}>{user.role}</Badge>
+            @{user.username} · <Badge tone={ROLE_TONE[user.role]}>{user.role}</Badge>
           </p>
         </div>
         <Button variant="danger" onClick={logout}>
@@ -123,11 +124,11 @@ function MyAccount() {
             <FormGroup label="Current password" wide>
               <Field type="password" value={current} onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
             </FormGroup>
-            <FormGroup label="New password" hint="At least 8 characters.">
-              <Field type="password" value={next} onChange={(e) => setNext(e.target.value)} minLength={8} maxLength={72} required autoComplete="new-password" />
+            <FormGroup label="New password" hint={`At least ${passwordMin} characters.`}>
+              <Field type="password" value={next} onChange={(e) => setNext(e.target.value)} minLength={passwordMin} maxLength={72} required autoComplete="new-password" />
             </FormGroup>
             <FormGroup label="Repeat new password">
-              <Field type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} minLength={8} maxLength={72} required autoComplete="new-password" />
+              <Field type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} minLength={passwordMin} maxLength={72} required autoComplete="new-password" />
             </FormGroup>
           </div>
           <FormError message={error} />
@@ -155,8 +156,8 @@ function MyAccount() {
 }
 
 export function SettingsPage({ params }: { params: PageParams }) {
-  const { isManager, settings, reloadSettings, reloadAlerts, toast } = useApp()
-  const sections = SECTIONS.filter((s) => isManager || !s.manager)
+  const { isAdmin, settings, reloadSettings, reloadAlerts, toast } = useApp()
+  const sections = SECTIONS.filter((s) => isAdmin || !s.adminOnly)
   const [section, setSection] = useState(params.section && sections.some((s) => s.id === params.section) ? params.section : sections[0].id)
   const [draft, setDraft] = useState<SettingsMap>(settings)
   const [error, setError] = useState("")
@@ -200,7 +201,7 @@ export function SettingsPage({ params }: { params: PageParams }) {
 
   return (
     <div className="page-stack">
-      <PageIntro eyebrow="CONFIGURATION" title="Settings" subtitle={isManager ? "Manage business details, receipts, alerts, and your account." : "Manage your account."} />
+      <PageIntro eyebrow="CONFIGURATION" title="Settings" subtitle={isAdmin ? "Manage business details, receipts, alerts, and your account." : "Manage your account."} />
       <div className={`settings-layout ${sections.length === 1 ? "single" : ""}`}>
         {sections.length > 1 && (
           <aside className="settings-nav">

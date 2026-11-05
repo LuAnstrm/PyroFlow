@@ -1,14 +1,15 @@
 import { useState } from "react"
 import { Check, CircleCheck, CircleX, Download, KeyRound, Pencil, Plus, Power, Search, ShieldCheck, UserCheck, Users, Wifi } from "lucide-react"
 import { api, downloadCsv, fmtDateTime, timeAgo, useApp, useFetch, type PageParams, type Paged, type Role } from "../lib"
-import { Avatar, Badge, Button, Card, Confirm, Empty, ErrorBox, Field, FormError, FormGroup, Loading, Metric, Modal, PageIntro, Pagination, Select, type Tone } from "../ui"
+import { Avatar, Badge, Button, Card, Confirm, Empty, ErrorBox, Field, FormError, FormGroup, Loading, Metric, Modal, PageIntro, Pagination, ROLE_TONE, Select } from "../ui"
 
 type Account = { id: number; name: string; username: string; role: Role; status: "Active" | "Inactive"; createdAt: string; lastLoginAt: string | null; online: number; loginCount: number }
 type LoginLog = { id: number; username: string; success: number; reason: string | null; ip: string | null; device: string | null; loginAt: string; logoutAt: string | null; name: string | null; role: Role | null; active: number }
-const ROLE_TONE: Record<Role, Tone> = { Administrator: "danger", Owner: "warning", Staff: "info" }
-const ROLE_LABEL: Record<Role, string> = { Administrator: "Administrator", Owner: "Owner", Staff: "Staff (cashier)" }
+const ROLE_LABEL: Record<Role, string> = { Administrator: "Administrator", Owner: "Owner", Manager: "Manager", Staff: "Staff (cashier)" }
 
 function AccountForm({ account, isSelf, onClose, onSaved }: { account: Account | null; isSelf: boolean; onClose: () => void; onSaved: () => void }) {
+  const { settings } = useApp()
+  const passwordMin = Number(settings.security_password_min) || 8
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -38,13 +39,14 @@ function AccountForm({ account, isSelf, onClose, onSaved }: { account: Account |
           <FormGroup label="Role" hint={isSelf ? "You can't change your own role." : undefined}>
             <Select name="role" defaultValue={account?.role ?? "Staff"} disabled={isSelf}>
               <option value="Staff">Staff (cashier)</option>
+              <option value="Manager">Manager</option>
               <option value="Owner">Owner</option>
               <option value="Administrator">Administrator</option>
             </Select>
           </FormGroup>
           {!account && (
-            <FormGroup label="Temporary password" hint="At least 8 characters. Share it with the person privately." wide>
-              <Field name="password" type="password" minLength={8} maxLength={72} required autoComplete="new-password" />
+            <FormGroup label="Temporary password" hint={`At least ${passwordMin} characters. Share it with the person privately.`} wide>
+              <Field name="password" type="password" minLength={passwordMin} maxLength={72} required autoComplete="new-password" />
             </FormGroup>
           )}
         </div>
@@ -63,6 +65,8 @@ function AccountForm({ account, isSelf, onClose, onSaved }: { account: Account |
 }
 
 function ResetPassword({ account, onClose, onSaved }: { account: Account; onClose: () => void; onSaved: () => void }) {
+  const { settings } = useApp()
+  const passwordMin = Number(settings.security_password_min) || 8
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const submit = async (e: React.FormEvent) => {
@@ -77,8 +81,8 @@ function ResetPassword({ account, onClose, onSaved }: { account: Account; onClos
   return (
     <Modal eyebrow="RESET PASSWORD" title={account.name} onClose={onClose} width={440}>
       <form onSubmit={submit} autoComplete="off">
-        <FormGroup label="New password" hint="At least 8 characters. They'll be signed out and must use the new one.">
-          <Field type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} maxLength={72} required autoFocus autoComplete="new-password" />
+        <FormGroup label="New password" hint={`At least ${passwordMin} characters. They'll be signed out and must use the new one.`}>
+          <Field type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={passwordMin} maxLength={72} required autoFocus autoComplete="new-password" />
         </FormGroup>
         <FormError message={error} />
         <div className="modal-actions">
@@ -222,7 +226,7 @@ export function Accounts({ params }: { params: PageParams }) {
         </Button>
       </PageIntro>
       <div className="metrics-grid">
-        <Metric icon={Users} label="All accounts" value={String(all.length)} note={`${all.filter((u) => u.role === "Staff").length} cashiers`} tone="blue" />
+        <Metric icon={Users} label="All accounts" value={String(all.length)} note={`${all.filter((u) => u.role === "Manager").length} managers, ${all.filter((u) => u.role === "Staff").length} cashiers`} tone="blue" />
         <Metric icon={UserCheck} label="Active" value={String(all.filter((u) => u.status === "Active").length)} note="Can sign in" tone="green" />
         <Metric icon={Wifi} label="Using the POS now" value={String(all.filter((u) => u.online).length)} note="Active in the last 5 minutes" />
         <Metric icon={ShieldCheck} label="Inactive" value={String(all.filter((u) => u.status === "Inactive").length)} note="Blocked from signing in" tone="red" />
@@ -245,6 +249,7 @@ export function Accounts({ params }: { params: PageParams }) {
               <option value="">All roles</option>
               <option>Administrator</option>
               <option>Owner</option>
+              <option>Manager</option>
               <option>Staff</option>
             </Select>
           </div>

@@ -9,6 +9,7 @@ import {
   FileBarChart,
   Flame,
   HelpCircle,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -20,10 +21,11 @@ import {
   ShoppingCart,
   TrendingUp,
   UserCog,
+  Users,
   X,
 } from "lucide-react"
-import { api, AppContext, fmtDateTime, peso, type Alerts, type AppContextValue, type CartItem, type Page, type PageParams, type Product, type Role, type Sale, type Settings, type User } from "./lib"
-import { Avatar, Badge, Button, ErrorBox, Field, Loading, Logo, Modal, ProductTile } from "./ui"
+import { api, AppContext, fmtDateTime, peso, type Alerts, type AppContextValue, type CartItem, type Page, type PageParams, type Permission, type Product, type Sale, type Settings, type User } from "./lib"
+import { Avatar, Badge, Button, ErrorBox, Field, Loading, Logo, Modal, ProductTile, ROLE_TONE } from "./ui"
 import { Dashboard } from "./pages/Dashboard"
 import { POS } from "./pages/POS"
 import { Inventory } from "./pages/Inventory"
@@ -31,18 +33,22 @@ import { ForecastPage } from "./pages/Forecast"
 import { Transactions } from "./pages/Transactions"
 import { Reports } from "./pages/Reports"
 import { Accounts } from "./pages/Accounts"
+import { SecurityPage } from "./pages/Security"
 import { SettingsPage } from "./pages/Settings"
+import { StaffOperations } from "./pages/StaffOperations"
 
-const ALL: Role[] = ["Administrator", "Owner", "Staff"]
-const NAV: { id: Page; label: string; icon: React.ElementType; roles: Role[] }[] = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ALL },
-  { id: "pos", label: "Point of Sale", icon: ShoppingCart, roles: ALL },
-  { id: "inventory", label: "Inventory", icon: Boxes, roles: ALL },
-  { id: "forecast", label: "Sales Forecasting", icon: TrendingUp, roles: ["Administrator", "Owner"] },
-  { id: "transactions", label: "Transactions", icon: ReceiptText, roles: ALL },
-  { id: "reports", label: "Reports & Analytics", icon: FileBarChart, roles: ["Administrator", "Owner"] },
-  { id: "accounts", label: "Accounts & Logins", icon: ShieldCheck, roles: ["Administrator"] },
-  { id: "settings", label: "Settings", icon: SettingsIcon, roles: ALL },
+type Can = AppContextValue["can"]
+const NAV: { id: Page; label: string; icon: React.ElementType; show: (can: Can, isAdmin: boolean) => boolean }[] = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: () => true },
+  { id: "pos", label: "Point of Sale", icon: ShoppingCart, show: (can) => can("sales.process") },
+  { id: "inventory", label: "Inventory", icon: Boxes, show: (can) => can("inventory.view") },
+  { id: "forecast", label: "Sales Forecasting", icon: TrendingUp, show: (can) => can("forecast.view") },
+  { id: "transactions", label: "Transactions", icon: ReceiptText, show: (can) => can("transactions.all") || can("sales.process") },
+  { id: "reports", label: "Reports & Analytics", icon: FileBarChart, show: (can) => can("reports.view") },
+  { id: "staff", label: "Staff Operations", icon: Users, show: (can) => can("staff.operations") },
+  { id: "accounts", label: "Accounts & Logins", icon: ShieldCheck, show: (_can, isAdmin) => isAdmin },
+  { id: "security", label: "Permissions & Security", icon: KeyRound, show: (_can, isAdmin) => isAdmin },
+  { id: "settings", label: "Settings", icon: SettingsIcon, show: () => true },
 ]
 
 function usePopover() {
@@ -64,7 +70,7 @@ function usePopover() {
   return { open, setOpen, ref }
 }
 
-function Notifications({ alerts, go, isManager }: { alerts: Alerts; go: AppContextValue["go"]; isManager: boolean }) {
+function Notifications({ alerts, go, canRestock, isAdmin }: { alerts: Alerts; go: AppContextValue["go"]; canRestock: boolean; isAdmin: boolean }) {
   const { open, setOpen, ref } = usePopover()
   const out = alerts.items.filter((a) => a.level === "out")
   const low = alerts.items.filter((a) => a.level === "low")
@@ -84,10 +90,10 @@ function Notifications({ alerts, go, isManager }: { alerts: Alerts; go: AppConte
         variant="secondary"
         onClick={() => {
           setOpen(false)
-          go("inventory", isManager ? { stockFor: a.id } : { search: a.sku })
+          go("inventory", canRestock ? { stockFor: a.id } : { search: a.sku })
         }}
       >
-        {isManager ? "Restock" : "View"}
+        {canRestock ? "Restock" : "View"}
       </Button>
     </div>
   )
@@ -107,7 +113,7 @@ function Notifications({ alerts, go, isManager }: { alerts: Alerts; go: AppConte
             <div className="popover-empty">
               <Bell size={22} />
               <p>Low-stock alerts are turned off.</p>
-              {isManager && (
+              {isAdmin && (
                 <Button
                   size="sm"
                   variant="secondary"
@@ -184,7 +190,7 @@ function ProfileMenu({ user, go, logout, isAdmin }: { user: User; go: AppContext
             <div>
               <strong>{user.name}</strong>
               <span>@{user.username}</span>
-              <Badge tone={user.role === "Administrator" ? "danger" : user.role === "Owner" ? "warning" : "info"}>{user.role}</Badge>
+              <Badge tone={ROLE_TONE[user.role]}>{user.role}</Badge>
             </div>
           </div>
           {user.lastLoginAt && <p className="profile-last">Signed in {fmtDateTime(user.lastLoginAt)}</p>}
@@ -271,19 +277,15 @@ function SearchDialog({ onClose, go }: { onClose: () => void; go: AppContextValu
   )
 }
 
-function HelpDialog({ role, onClose }: { role: Role; onClose: () => void }) {
-  const tips: [string, string][] = [
-    ["Ring up a sale", "Open Point of Sale, click products to fill the cart, choose Cash, Online Payment or Card, then press Complete sale. The receipt opens ready to print."],
-    ["Reprint a receipt", "Open Transactions, press View on the sale, then Print receipt."],
-    ["Change your password", "Click your name at the top right, then My account."],
-  ]
-  if (role !== "Staff") {
-    tips.push(
-      ["Restock a product", "Open Inventory and press Stock in on the product's row. Every change appears under Recent inventory movement."],
-      ["Plan your orders", "Sales Forecasting lists which products will run out and how many to order, based on your recorded sales."],
-    )
-  }
-  if (role === "Administrator") tips.push(["Add an account", "Open Accounts & Logins and press Add account. The Login history tab shows everyone who has signed in."])
+function HelpDialog({ can, isAdmin, onClose }: { can: Can; isAdmin: boolean; onClose: () => void }) {
+  const tips: [string, string][] = []
+  if (can("sales.process")) tips.push(["Ring up a sale", "Open Point of Sale, click products to fill the cart, choose Cash, Online Payment or Card, then press Complete sale. The receipt opens ready to print."])
+  if (can("sales.process") || can("transactions.all")) tips.push(["Reprint a receipt", "Open Transactions, press View on the sale, then Print receipt."])
+  if (can("inventory.manage")) tips.push(["Restock a product", "Open Inventory and press Stock in on the product's row. Every change appears under Recent inventory movement."])
+  if (can("forecast.view")) tips.push(["Plan your orders", "Sales Forecasting lists which products will run out and how many to order, based on your recorded sales."])
+  if (can("staff.operations")) tips.push(["Check on your cashiers", "Staff Operations shows each cashier's sales for the day. Press Sales to see their transactions, or end their shift when they finish."])
+  if (isAdmin) tips.push(["Add an account", "Open Accounts & Logins and press Add account. The Login history tab shows everyone who has signed in."], ["Change what a role can do", "Open Permissions & Security, tick or untick a permission, then press Save permissions."])
+  tips.push(["Change your password", "Click your name at the top right, then My account."])
   return (
     <Modal eyebrow="HELP" title="How do I…?" onClose={onClose} width={520}>
       <div className="help-list">
@@ -307,8 +309,13 @@ function readHash(allowed: Page[]): Page {
 }
 
 export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u: User) => void; onLoggedOut: () => void }) {
-  const allowed = useMemo(() => NAV.filter((n) => n.roles.includes(user.role)).map((n) => n.id), [user.role])
-  const [page, setPage] = useState<Page>(() => readHash(allowed))
+  const isAdmin = user.role === "Administrator"
+  const can = useCallback<Can>((permission: Permission) => user.permissions.includes(permission), [user.permissions])
+  const nav = useMemo(() => NAV.filter((n) => n.show(can, isAdmin)), [can, isAdmin])
+  const allowed = useMemo(() => nav.map((n) => n.id), [nav])
+  const [requestedPage, setPage] = useState<Page>(() => readHash(allowed))
+  // If an admin removes access while this page is open, fall back to the dashboard.
+  const page = allowed.includes(requestedPage) ? requestedPage : "dashboard"
   const [params, setParams] = useState<PageParams>({})
   const [sidebar, setSidebar] = useState(false)
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -333,6 +340,15 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
     reloadSettings()
     reloadAlerts()
   }, [reloadSettings, reloadAlerts])
+
+  // Picks up permission changes an admin has made since this person signed in.
+  useEffect(() => {
+    api<{ user: User | null }>("/auth/me")
+      .then((r) => {
+        if (r.user && r.user.permissions.join() + r.user.role !== user.permissions.join() + user.role) setUser(r.user)
+      })
+      .catch(() => {})
+  }, [page, setUser, user.permissions, user.role])
 
   useEffect(() => {
     const onHash = () => setPage(readHash(allowed))
@@ -386,10 +402,9 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
     toast,
     go,
     logout,
-    isManager: user.role !== "Staff",
-    isAdmin: user.role === "Administrator",
+    can,
+    isAdmin,
   }
-  const nav = NAV.filter((n) => n.roles.includes(user.role))
   const alertCount = alerts.enabled ? alerts.items.length : 0
   const paramKey = JSON.stringify(params)
 
@@ -444,8 +459,8 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
               <button type="button" className="icon-button" onClick={() => setSearch(true)} aria-label="Search">
                 <Search size={19} />
               </button>
-              <Notifications alerts={alerts} go={go} isManager={ctx.isManager} />
-              <ProfileMenu user={user} go={go} logout={logout} isAdmin={ctx.isAdmin} />
+              {can("inventory.view") && <Notifications alerts={alerts} go={go} canRestock={can("inventory.manage")} isAdmin={isAdmin} />}
+              <ProfileMenu user={user} go={go} logout={logout} isAdmin={isAdmin} />
             </div>
           </header>
           <main className={`main-content ${page === "pos" ? "pos-content" : ""}`}>
@@ -455,12 +470,14 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
             {page === "forecast" && <ForecastPage />}
             {page === "transactions" && <Transactions key={paramKey} params={params} />}
             {page === "reports" && <Reports />}
+            {page === "staff" && <StaffOperations />}
             {page === "accounts" && <Accounts key={paramKey} params={params} />}
+            {page === "security" && <SecurityPage />}
             {page === "settings" && <SettingsPage key={paramKey} params={params} />}
           </main>
         </div>
         {search && <SearchDialog onClose={() => setSearch(false)} go={go} />}
-        {help && <HelpDialog role={user.role} onClose={() => setHelp(false)} />}
+        {help && <HelpDialog can={can} isAdmin={isAdmin} onClose={() => setHelp(false)} />}
         <div className="toasts" role="status">
           {toasts.map((t) => (
             <div className={`toast toast-${t.tone}`} key={t.id}>

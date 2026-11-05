@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { AlertTriangle, ChevronRight, Database, Eye, EyeOff, ShieldCheck, ShoppingCart, TrendingUp } from "lucide-react"
+import { AlertTriangle, Boxes, ChevronRight, Database, Eye, EyeOff, ShieldCheck, ShoppingCart, TrendingUp } from "lucide-react"
 import { api, type User } from "./lib"
 import { Button, Field, FormGroup, Logo, Modal } from "./ui"
 
@@ -161,6 +161,12 @@ export function Login({ onLogin }: { onLogin: (u: User) => void }) {
                 <TrendingUp size={18} />
                 <span>
                   <b>Owner</b>Business view
+                </span>
+              </button>
+              <button type="button" onClick={() => useDemo("Manager123", "Manager")}>
+                <Boxes size={18} />
+                <span>
+                  <b>Manager</b>Stock &amp; team
                 </span>
               </button>
               <button type="button" onClick={() => useDemo("Staff", "Staff")}>

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 import mysql from "mysql2/promise"
 import bcrypt from "bcryptjs"
 import { connectionConfig, dbName } from "./db.js"
+import { migrate } from "./permissions.js"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -27,6 +28,7 @@ const USERS = [
   // The demo logins from the original prototype.
   ["Alex Rivera", "Admin123", "Admin", "Administrator", "Active"],
   ["Sofia Reyes", "Owner123", "Owner", "Owner", "Active"],
+  ["Marco Dela Cruz", "Manager123", "Manager", "Manager", "Active"],
   ["Mia Santos", "Staff", "Staff", "Staff", "Active"],
   ["John Cruz", "john.cruz", "Staff1234", "Staff", "Active"],
   ["Elena Lim", "elena.lim", "Staff1234", "Staff", "Inactive"],
@@ -136,9 +138,20 @@ async function main() {
   await conn.query(`USE \`${dbName}\``)
   await conn.query(fs.readFileSync(path.join(here, "schema.sql"), "utf8"))
 
+  const exec = async (sql, params) => (await conn.query(sql, params))[0]
+  await migrate(exec)
+
   const [[{ n }]] = await conn.query("SELECT COUNT(*) AS n FROM users")
   if (n > 0) {
-    console.log(`Database "${dbName}" already has data, so nothing was changed.`)
+    // An older demo database has no Manager, and the login page offers one. This only runs
+    // when someone asks for db:setup; the API's own upgrade never creates accounts.
+    const manager = USERS.find((u) => u[3] === "Manager")
+    const [managers] = await conn.query("SELECT id FROM users WHERE role = 'Manager' OR username = ?", [manager[1]])
+    if (!managers.length) {
+      await conn.query("INSERT INTO users (full_name, username, password_hash, role, status) VALUES (?,?,?,?,?)", [manager[0], manager[1], await bcrypt.hash(manager[2], 10), manager[3], manager[4]])
+      console.log(`Added the demo Manager account (${manager[1]}).`)
+    }
+    console.log(`Database "${dbName}" already has data, so it was only upgraded. Your data wasn't changed.`)
     console.log("Run `npm run db:reset` to delete it and start over.")
     await conn.end()
     return

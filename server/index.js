@@ -6,6 +6,7 @@ import express from "express"
 import bcrypt from "bcryptjs"
 import { query, transaction } from "./db.js"
 import { buildForecast, toKey } from "./forecast.js"
+import { EDITABLE_ROLES, migrate, PERMISSION_KEYS, PERMISSIONS, ROLES, SECURITY_RULES } from "./permissions.js"
 
 const app = express()
 app.disable("x-powered-by")
@@ -35,7 +36,6 @@ class ApiError extends Error {
   }
 }
 const money = (n) => Math.round(n * 100) / 100
-const MANAGERS = ["Administrator", "Owner"]
 const COOKIE = "pyroflow_session"
 const hashToken = (t) => crypto.createHash("sha256").update(t).digest("hex")
 
@@ -69,9 +69,10 @@ function readPaging(q) {
   }
   return { page: whole(q.page, 1, 1000000), size: whole(q.size, 10, 5000) }
 }
-function newPassword(value) {
+async function newPassword(value) {
   const password = typeof value === "string" ? value : ""
-  if (password.length < 8) throw new ApiError(400, "Use at least 8 characters for the password.")
+  const { passwordMin } = await readSecurity()
+  if (password.length < passwordMin) throw new ApiError(400, `Use at least ${passwordMin} characters for the password.`)
   // bcrypt ignores everything past 72 bytes, so a longer password would be weaker than it looks.
   if (Buffer.byteLength(password) > 72) throw new ApiError(400, "Use at most 72 characters for the password.")
   return password
@@ -91,7 +92,33 @@ function readCookie(req) {
   const match = (req.headers.cookie ?? "").match(new RegExp(`(?:^|; )${COOKIE}=([^;]+)`))
   return match?.[1]
 }
-const publicUser = (u) => ({ id: u.id, name: u.full_name, username: u.username, role: u.role, lastLoginAt: u.last_login_at, createdAt: u.created_at })
+
+// --- Permissions ----------------------------------------------------------
+
+/** Saved permissions for each role, held in memory and refreshed whenever an admin saves them. */
+let rolePermissions = new Map()
+async function loadPermissions() {
+  const rows = await query("SELECT role, permission FROM role_permissions WHERE allowed = 1")
+  rolePermissions = new Map(EDITABLE_ROLES.map((role) => [role, new Set(rows.filter((r) => r.role === role).map((r) => r.permission))]))
+}
+const permissionsFor = (role) => (role === "Administrator" ? PERMISSION_KEYS : PERMISSION_KEYS.filter((key) => rolePermissions.get(role)?.has(key)))
+const can = (req, permission) => req.user.role === "Administrator" || Boolean(rolePermissions.get(req.user.role)?.has(permission))
+
+// Upgrades older databases on first use. It retries on later requests if MySQL
+// isn't ready yet, and the error handler below reports that as DB_DOWN.
+let readyPromise = null
+app.use("/api", async (_req, _res, next) => {
+  readyPromise ??= migrate(query)
+    .then(loadPermissions)
+    .catch((err) => {
+      readyPromise = null
+      throw err
+    })
+  await readyPromise
+  next()
+})
+
+const publicUser = (u) => ({ id: u.id, name: u.full_name, username: u.username, role: u.role, permissions: permissionsFor(u.role), lastLoginAt: u.last_login_at, createdAt: u.created_at })
 
 // --- Auth ---------------------------------------------------------------
 
@@ -122,37 +149,39 @@ const allow = (...roles) => (req, _res, next) => {
   if (!roles.includes(req.user.role)) throw new ApiError(403, "Your account doesn't have access to this.")
   next()
 }
-const managers = allow(...MANAGERS)
 const adminOnly = allow("Administrator")
-const isManager = (req) => MANAGERS.includes(req.user.role)
+/** Lets the request through if the account has at least one of these permissions. */
+const need = (...permissions) => (req, _res, next) => {
+  if (!permissions.some((p) => can(req, p))) throw new ApiError(403, "Your account doesn't have access to this.")
+  next()
+}
 
 app.get("/api/health", async (_req, res) => {
   await query("SELECT 1 FROM users LIMIT 1")
   res.json({ ok: true })
 })
 
-// Slows down password guessing: 5 failures in a row locks that username, from
-// that address, for 2 minutes. Kept in memory, so restarting the API clears it.
-const MAX_FAILED_LOGINS = 5
-const LOGIN_LOCK_MS = 2 * 60 * 1000
+// Slows down password guessing: too many failures in a row locks that username, from
+// that address, for a while (both set under Security). Kept in memory, so restarting
+// the API clears it.
 const failedLogins = new Map()
 
-function recordFailedLogin(key) {
+function recordFailedLogin(key, lockMs) {
   const entry = failedLogins.get(key)
-  const count = entry && Date.now() - entry.at < LOGIN_LOCK_MS ? entry.count + 1 : 1
+  const count = entry && Date.now() - entry.at < lockMs ? entry.count + 1 : 1
   failedLogins.delete(key)
   failedLogins.set(key, { count, at: Date.now() })
   if (failedLogins.size > 5000) failedLogins.delete(failedLogins.keys().next().value)
 }
-function loginLockRemaining(key) {
+function loginLockRemaining(key, lockMs, maxFailed) {
   const entry = failedLogins.get(key)
   if (!entry) return 0
-  const left = entry.at + LOGIN_LOCK_MS - Date.now()
+  const left = entry.at + lockMs - Date.now()
   if (left <= 0) {
     failedLogins.delete(key)
     return 0
   }
-  return entry.count >= MAX_FAILED_LOGINS ? left : 0
+  return entry.count >= maxFailed ? left : 0
 }
 // Compared against when the username doesn't exist, so a wrong username takes
 // as long as a wrong password and response times don't reveal valid usernames.
@@ -166,15 +195,17 @@ app.post("/api/auth/login", async (req, res) => {
   const [user] = await query("SELECT * FROM users WHERE username = ?", [username])
   const log = (success, reason) => query("INSERT INTO login_logs (user_id, username, success, reason, ip, user_agent, login_at) VALUES (?,?,?,?,?,?,NOW())", [user?.id ?? null, username, success, reason, req.ip, ua])
 
+  const security = await readSecurity()
+  const lockMs = security.lockMinutes * 60000
   const attemptKey = `${req.ip}|${username.toLowerCase()}`
-  const lockedMs = loginLockRemaining(attemptKey)
+  const lockedMs = loginLockRemaining(attemptKey, lockMs, security.maxFailedLogins)
   if (lockedMs > 0) {
     await log(0, "Too many attempts")
     throw new ApiError(429, `Too many failed attempts. Please try again in ${Math.ceil(lockedMs / 60000)} ${lockedMs > 60000 ? "minutes" : "minute"}.`)
   }
   const passwordOk = await bcrypt.compare(password, user?.password_hash ?? DUMMY_HASH)
   if (!user || !passwordOk) {
-    recordFailedLogin(attemptKey)
+    recordFailedLogin(attemptKey, lockMs)
     await log(0, user ? "Wrong password" : "Unknown username")
     throw new ApiError(401, "The username or password you entered is incorrect.")
   }
@@ -185,7 +216,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
   const { insertId } = await log(1, null)
   const token = crypto.randomBytes(32).toString("hex")
-  const hours = remember ? 24 * 30 : 12
+  const hours = remember ? 24 * 30 : security.sessionHours
   await query("DELETE FROM sessions WHERE expires_at < NOW()")
   await query("INSERT INTO sessions (token_hash, user_id, login_log_id, expires_at, last_seen_at) VALUES (?,?,?,DATE_ADD(NOW(), INTERVAL ? HOUR),NOW())", [hashToken(token), user.id, insertId, hours])
   await query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [user.id])
@@ -217,7 +248,7 @@ app.put("/api/account", auth, async (req, res) => {
 
 app.post("/api/account/password", auth, async (req, res) => {
   if (!(await bcrypt.compare(String(req.body.current ?? ""), req.user.password_hash))) throw new ApiError(400, "Your current password is incorrect.")
-  const password = newPassword(req.body.next)
+  const password = await newPassword(req.body.next)
   await query("UPDATE users SET password_hash = ? WHERE id = ?", [await bcrypt.hash(password, 10), req.user.id])
   // Anyone signed in elsewhere with the old password is signed out.
   await endSessions(req.user.id, req.tokenHash)
@@ -235,11 +266,34 @@ async function readSettings() {
   return Object.fromEntries(rows.map((r) => [r.setting_key, r.setting_value]))
 }
 
-app.get("/api/settings", auth, async (_req, res) => res.json(await readSettings()))
+/** Settings anyone signed in can read. Security values stay out, apart from the password rule forms need. */
+async function readPublicSettings() {
+  const all = await readSettings()
+  const visible = Object.entries(all).filter(([key]) => !key.startsWith("security_") || key === "security_password_min")
+  return Object.fromEntries(visible)
+}
+
+/** The security rules, falling back to the default if a stored value is unusable. */
+async function readSecurity() {
+  const stored = await readSettings()
+  const value = (key) => {
+    const rule = SECURITY_RULES[key]
+    const n = Number(stored[key])
+    return Number.isInteger(n) && n >= rule.min && n <= rule.max ? n : rule.fallback
+  }
+  return {
+    maxFailedLogins: value("security_max_failed_logins"),
+    lockMinutes: value("security_lock_minutes"),
+    sessionHours: value("security_session_hours"),
+    passwordMin: value("security_password_min"),
+  }
+}
+
+app.get("/api/settings", auth, async (_req, res) => res.json(await readPublicSettings()))
 
 const SETTING_KEYS = ["business_name", "business_address", "contact_number", "email", "tin", "branch_name", "tax_rate", "receipt_header", "receipt_footer", "receipt_show_cashier", "receipt_show_tin", "receipt_auto_print", "low_stock_alerts", "alert_after_sale"]
 
-app.put("/api/settings", auth, managers, async (req, res) => {
+app.put("/api/settings", auth, adminOnly, async (req, res) => {
   const entries = Object.entries(req.body).filter(([k]) => SETTING_KEYS.includes(k))
   if ("tax_rate" in req.body) {
     const rate = Number(req.body.tax_rate)
@@ -250,7 +304,7 @@ app.put("/api/settings", auth, managers, async (req, res) => {
   for (const [k, v] of entries) {
     await query("INSERT INTO settings (setting_key, setting_value) VALUES (?,?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)", [k, String(v)])
   }
-  res.json(await readSettings())
+  res.json(await readPublicSettings())
 })
 
 async function readAlerts() {
@@ -271,22 +325,22 @@ async function readAlerts() {
     })),
   }
 }
-app.get("/api/alerts", auth, async (_req, res) => res.json(await readAlerts()))
+app.get("/api/alerts", auth, async (req, res) => res.json(can(req, "inventory.view") ? await readAlerts() : { enabled: false, items: [] }))
 
 // --- Products & stock ----------------------------------------------------
 
-app.get("/api/products", auth, async (req, res) => {
+// The Point of Sale needs the product list too, not just Inventory.
+app.get("/api/products", auth, need("inventory.view", "sales.process"), async (req, res) => {
   const rows = await query(
     `SELECT p.id, p.name, p.sku, p.category, p.price, p.cost, p.stock, p.min_stock AS min,
        COALESCE((SELECT SUM(si.qty) FROM sale_items si JOIN sales s ON s.id = si.sale_id
          WHERE si.product_id = p.id AND s.status = 'Completed' AND s.sold_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)), 0) AS sold30
      FROM products p WHERE p.active = 1 ORDER BY p.name`,
   )
-  // Cost prices are for owners and admins only.
-  res.json(isManager(req) ? rows : rows.map(({ cost, ...p }) => p))
+  res.json(can(req, "products.pricing") ? rows : rows.map(({ cost, ...p }) => p))
 })
 
-function readProductBody(body) {
+function readProductBody(body, withPrices = true) {
   const data = {
     name: text(body.name, "Product name", 120),
     sku: text(body.sku, "SKU", 30).toUpperCase(),
@@ -296,8 +350,10 @@ function readProductBody(body) {
     min: Number(body.min),
   }
   if (!data.name || !data.sku || !data.category) throw new ApiError(400, "Name, SKU and category are required.")
-  if (!(data.price >= 0) || !(data.cost >= 0)) throw new ApiError(400, "Price and cost must be 0 or more.")
-  if (data.price > MAX_PRICE || data.cost > MAX_PRICE) throw new ApiError(400, "Price and cost can't be more than ₱99,999,999.99.")
+  if (withPrices) {
+    if (!(data.price >= 0) || !(data.cost >= 0)) throw new ApiError(400, "Price and cost must be 0 or more.")
+    if (data.price > MAX_PRICE || data.cost > MAX_PRICE) throw new ApiError(400, "Price and cost can't be more than ₱99,999,999.99.")
+  }
   if (!Number.isInteger(data.min) || data.min < 0 || data.min > MAX_UNITS) throw new ApiError(400, "Minimum stock must be a whole number from 0 to 1,000,000.")
   return data
 }
@@ -306,7 +362,8 @@ const duplicateSku = (err) => {
   throw err
 }
 
-app.post("/api/products", auth, managers, async (req, res) => {
+// A new product needs a price to be sellable, so anyone who can add one sets its first price.
+app.post("/api/products", auth, need("products.edit"), async (req, res) => {
   const data = readProductBody(req.body)
   const stock = Number(req.body.stock ?? 0)
   if (!Number.isInteger(stock) || stock < 0 || stock > MAX_UNITS) throw new ApiError(400, "Opening stock must be a whole number from 0 to 1,000,000.")
@@ -318,21 +375,26 @@ app.post("/api/products", auth, managers, async (req, res) => {
   res.status(201).json({ id })
 })
 
-app.put("/api/products/:id", auth, managers, async (req, res) => {
-  const data = readProductBody(req.body)
-  const result = await query("UPDATE products SET name=?, sku=?, category=?, price=?, cost=?, min_stock=? WHERE id=? AND active = 1", [data.name, data.sku, data.category, data.price, data.cost, data.min, req.params.id]).catch(duplicateSku)
+app.put("/api/products/:id", auth, need("products.edit"), async (req, res) => {
+  // Without the pricing permission, any price or cost in the request is ignored.
+  const pricing = can(req, "products.pricing")
+  const data = readProductBody(req.body, pricing)
+  const result = await (pricing
+    ? query("UPDATE products SET name=?, sku=?, category=?, price=?, cost=?, min_stock=? WHERE id=? AND active = 1", [data.name, data.sku, data.category, data.price, data.cost, data.min, req.params.id])
+    : query("UPDATE products SET name=?, sku=?, category=?, min_stock=? WHERE id=? AND active = 1", [data.name, data.sku, data.category, data.min, req.params.id])
+  ).catch(duplicateSku)
   mustExist(result, "Product not found.")
   res.json({ ok: true })
 })
 
 // Products stay in the database so old receipts and reports keep working.
-app.delete("/api/products/:id", auth, adminOnly, async (req, res) => {
+app.delete("/api/products/:id", auth, need("products.remove"), async (req, res) => {
   const result = await query("UPDATE products SET active = 0, sku = CONCAT(LEFT(sku, 28), '-DEL', id) WHERE id = ? AND active = 1", [req.params.id])
   mustExist(result, "Product not found.")
   res.json({ ok: true })
 })
 
-app.post("/api/products/:id/stock", auth, managers, async (req, res) => {
+app.post("/api/products/:id/stock", auth, need("inventory.manage"), async (req, res) => {
   const { type } = req.body
   const qty = Number(req.body.qty)
   const note = text(req.body.note, "Note", 200)
@@ -355,7 +417,7 @@ app.post("/api/products/:id/stock", auth, managers, async (req, res) => {
   res.json(product)
 })
 
-app.get("/api/movements", auth, async (req, res) => {
+app.get("/api/movements", auth, need("inventory.view"), async (req, res) => {
   const { page, size } = readPaging(req.query)
   const where = []
   const params = []
@@ -396,7 +458,7 @@ async function readSale(id) {
   return sale
 }
 
-app.post("/api/sales", auth, async (req, res) => {
+app.post("/api/sales", auth, need("sales.process"), async (req, res) => {
   const lines = Array.isArray(req.body.items) ? req.body.items : []
   const discountPct = Number(req.body.discountPct ?? 0)
   const method = req.body.method
@@ -464,8 +526,8 @@ app.get("/api/sales", auth, async (req, res) => {
     params.push(...values)
   }
   const q = req.query
-  // Cashiers only see their own sales.
-  if (!isManager(req)) add("s.user_id = ?", req.user.id)
+  // Without the permission, people only see their own sales.
+  if (!can(req, "transactions.all")) add("s.user_id = ?", req.user.id)
   else if (isId(q.cashier)) add("s.user_id = ?", q.cashier)
   if (single(q.search)) add("s.txn_no LIKE ?", `%${q.search}%`)
   if (isDateKey(q.from)) add("s.sold_at >= ?", `${q.from} 00:00:00`)
@@ -482,18 +544,18 @@ app.get("/api/sales", auth, async (req, res) => {
   res.json({ rows, total, page, size })
 })
 
-app.get("/api/sales/cashiers", auth, managers, async (_req, res) => {
+app.get("/api/sales/cashiers", auth, need("transactions.all"), async (_req, res) => {
   res.json(await query("SELECT DISTINCT u.id, u.full_name AS name FROM users u JOIN sales s ON s.user_id = u.id ORDER BY name"))
 })
 
 app.get("/api/sales/:id", auth, async (req, res) => {
   const sale = await readSale(req.params.id)
   const [owner] = await query("SELECT user_id FROM sales WHERE id = ?", [req.params.id])
-  if (!isManager(req) && owner.user_id !== req.user.id) throw new ApiError(403, "You can only open your own transactions.")
+  if (!can(req, "transactions.all") && owner.user_id !== req.user.id) throw new ApiError(403, "You can only open your own transactions.")
   res.json(sale)
 })
 
-app.post("/api/sales/:id/refund", auth, managers, async (req, res) => {
+app.post("/api/sales/:id/refund", auth, need("transactions.refund"), async (req, res) => {
   const reason = text(req.body.reason, "Reason", 200)
   if (!reason) throw new ApiError(400, "Please add a reason for the refund.")
   await transaction(async (conn) => {
@@ -535,7 +597,7 @@ async function forecastFor(horizon) {
   return result
 }
 
-app.get("/api/forecast", auth, managers, async (req, res) => {
+app.get("/api/forecast", auth, need("forecast.view"), async (req, res) => {
   const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 30
   const forecast = await forecastFor(days)
   forecast.months = await query(
@@ -548,51 +610,63 @@ app.get("/api/forecast", auth, managers, async (req, res) => {
 
 // --- Dashboard --------------------------------------------------------------
 
+// Each section is only worked out, and only sent, for accounts allowed to see it.
 app.get("/api/dashboard", auth, async (req, res) => {
+  const shopWide = can(req, "sales.monitor")
+  const allSales = can(req, "transactions.all")
+  const mine = shopWide ? "" : "AND s.user_id = ?"
+  const mineParams = shopWide ? [] : [req.user.id]
   const dayTotals = async (offset) => {
     const [row] = await query(
-      `SELECT COALESCE(SUM(total), 0) AS revenue, COUNT(*) AS orders FROM sales
-       WHERE status = 'Completed' AND DATE(sold_at) = DATE_SUB(CURDATE(), INTERVAL ? DAY) AND sold_at <= DATE_SUB(NOW(), INTERVAL ? DAY)`,
-      [offset, offset],
+      `SELECT COALESCE(SUM(s.total), 0) AS revenue, COUNT(*) AS orders FROM sales s
+       WHERE s.status = 'Completed' AND DATE(s.sold_at) = DATE_SUB(CURDATE(), INTERVAL ? DAY) AND s.sold_at <= DATE_SUB(NOW(), INTERVAL ? DAY) ${mine}`,
+      [offset, offset, ...mineParams],
     )
     return { revenue: Number(row.revenue), orders: Number(row.orders) }
   }
   const [today, yesterday] = [await dayTotals(0), await dayTotals(1)]
-  const [units] = await query("SELECT COALESCE(SUM(si.qty),0) AS units FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.status='Completed' AND DATE(s.sold_at)=CURDATE()")
-  const [counts] = await query("SELECT COUNT(*) AS products, SUM(stock) AS stock FROM products WHERE active = 1")
+  const [units] = await query(`SELECT COALESCE(SUM(si.qty),0) AS units FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.status='Completed' AND DATE(s.sold_at)=CURDATE() ${mine}`, mineParams)
+  const [counts] = can(req, "inventory.view") ? await query("SELECT COUNT(*) AS products, SUM(stock) AS stock FROM products WHERE active = 1") : [{ products: 0, stock: 0 }]
 
-  const daily = await query(
-    `SELECT DATE_FORMAT(sold_at, '%Y-%m-%d') AS label, SUM(total) AS value FROM sales
-     WHERE status='Completed' AND sold_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY) GROUP BY label ORDER BY label`,
-  )
-  const monthly = await query(
-    `SELECT DATE_FORMAT(sold_at, '%Y-%m') AS label, SUM(total) AS value FROM sales
-     WHERE status='Completed' AND sold_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 11 MONTH) GROUP BY label ORDER BY label`,
-  )
-  const topProducts = await query(
-    `SELECT p.id, p.name, p.category, SUM(si.qty) AS units, SUM(si.line_total) AS revenue
-     FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
-     WHERE s.status='Completed' AND s.sold_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY p.id, p.name, p.category ORDER BY units DESC LIMIT 5`,
-  )
-  const own = isManager(req) ? "" : "AND s.user_id = ?"
+  const daily = shopWide
+    ? await query(
+        `SELECT DATE_FORMAT(sold_at, '%Y-%m-%d') AS label, SUM(total) AS value FROM sales
+         WHERE status='Completed' AND sold_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY) GROUP BY label ORDER BY label`,
+      )
+    : []
+  // Long-term revenue belongs with reports, not day-to-day sales monitoring.
+  const monthly = can(req, "reports.view")
+    ? await query(
+        `SELECT DATE_FORMAT(sold_at, '%Y-%m') AS label, SUM(total) AS value FROM sales
+         WHERE status='Completed' AND sold_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 11 MONTH) GROUP BY label ORDER BY label`,
+      )
+    : []
+  const topProducts = shopWide
+    ? await query(
+        `SELECT p.id, p.name, p.category, SUM(si.qty) AS units, SUM(si.line_total) AS revenue
+         FROM sale_items si JOIN sales s ON s.id = si.sale_id JOIN products p ON p.id = si.product_id
+         WHERE s.status='Completed' AND s.sold_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY p.id, p.name, p.category ORDER BY units DESC LIMIT 5`,
+      )
+    : []
+  const own = allSales ? "" : "AND s.user_id = ?"
   const recent = await query(
     `SELECT ${SALE_COLUMNS}, (SELECT SUM(qty) FROM sale_items si WHERE si.sale_id = s.id) AS units
      FROM sales s JOIN users u ON u.id = s.user_id WHERE 1=1 ${own} ORDER BY s.sold_at DESC, s.id DESC LIMIT 6`,
-    isManager(req) ? [] : [req.user.id],
+    allSales ? [] : [req.user.id],
   )
-  const f = await forecastFor(30)
-  const week = f.points.slice(0, 7).reduce((s, p) => s + p.predicted, 0)
+  const f = can(req, "forecast.view") ? await forecastFor(30) : null
+  const week = f ? f.points.slice(0, 7).reduce((s, p) => s + p.predicted, 0) : 0
   res.json({
+    shopWide,
     today: { ...today, units: Number(units.units) },
     yesterday,
     products: counts.products,
     stockUnits: Number(counts.stock ?? 0),
     salesDaily: daily.map((d) => ({ ...d, value: Number(d.value) })),
     salesMonthly: monthly.map((d) => ({ ...d, value: Number(d.value) })),
-    // Sales per product are for owners and admins; cashiers only get the unit counts.
-    topProducts: isManager(req) ? topProducts : topProducts.map(({ revenue, ...p }) => p),
+    topProducts,
     recent,
-    forecast: {
+    forecast: f && {
       history: f.history.slice(-30),
       points: f.points,
       next7: week,
@@ -612,7 +686,7 @@ app.get("/api/dashboard", auth, async (req, res) => {
 
 // --- Reports ----------------------------------------------------------------
 
-app.get("/api/reports", auth, managers, async (req, res) => {
+app.get("/api/reports", auth, need("reports.view"), async (req, res) => {
   const today = toKey(new Date())
   let from = isDateKey(req.query.from) ? req.query.from : today.slice(0, 8) + "01"
   let to = isDateKey(req.query.to) ? req.query.to : today
@@ -703,6 +777,80 @@ app.get("/api/reports", auth, managers, async (req, res) => {
   })
 })
 
+// --- Staff operations ---------------------------------------------------------
+
+app.get("/api/staff/activity", auth, need("staff.operations"), async (req, res) => {
+  const date = isDateKey(req.query.date) ? req.query.date : toKey(new Date())
+  const rows = await query(
+    `SELECT u.id, u.full_name AS name, u.username, u.role, u.last_login_at AS lastLoginAt,
+       EXISTS(SELECT 1 FROM sessions x WHERE x.user_id = u.id AND x.expires_at > NOW() AND x.last_seen_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS online,
+       EXISTS(SELECT 1 FROM sessions x WHERE x.user_id = u.id AND x.expires_at > NOW()) AS signedIn,
+       COALESCE(SUM(s.status = 'Completed'), 0) AS orders,
+       COALESCE(SUM(IF(s.status = 'Completed', s.total, 0)), 0) AS revenue,
+       COALESCE(SUM(s.status = 'Refunded'), 0) AS refunds,
+       COALESCE(SUM(IF(s.status = 'Refunded', s.total, 0)), 0) AS refundAmount,
+       MAX(s.sold_at) AS lastSaleAt
+     FROM users u LEFT JOIN sales s ON s.user_id = u.id AND s.sold_at BETWEEN ? AND ?
+     WHERE (u.role = 'Staff' AND u.status = 'Active') OR s.id IS NOT NULL
+     GROUP BY u.id, u.full_name, u.username, u.role, u.last_login_at
+     ORDER BY revenue DESC, u.full_name`,
+    [`${date} 00:00:00`, `${date} 23:59:59`],
+  )
+  res.json({ date, rows: rows.map((r) => ({ ...r, orders: Number(r.orders), revenue: Number(r.revenue), refunds: Number(r.refunds), refundAmount: Number(r.refundAmount) })) })
+})
+
+// Ends a cashier's shift by signing them out everywhere. Only ever reaches Staff accounts.
+app.post("/api/staff/:id/end-shift", auth, need("staff.operations"), async (req, res) => {
+  const [target] = await query("SELECT id, role FROM users WHERE id = ?", [req.params.id])
+  if (!target) throw new ApiError(404, "Account not found.")
+  if (target.role !== "Staff") throw new ApiError(403, "You can only end the shift of a Staff account.")
+  await endSessions(target.id)
+  res.json({ ok: true })
+})
+
+// --- Permissions & security (administrator) ------------------------------------
+
+async function readPermissionMatrix() {
+  const rows = await query("SELECT role, permission FROM role_permissions WHERE allowed = 1")
+  return Object.fromEntries(EDITABLE_ROLES.map((role) => [role, rows.filter((r) => r.role === role && PERMISSION_KEYS.includes(r.permission)).map((r) => r.permission)]))
+}
+
+app.get("/api/permissions", auth, adminOnly, async (_req, res) => {
+  res.json({ roles: EDITABLE_ROLES, catalog: PERMISSIONS, matrix: await readPermissionMatrix() })
+})
+
+app.put("/api/permissions", auth, adminOnly, async (req, res) => {
+  const matrix = req.body.matrix
+  for (const role of EDITABLE_ROLES) {
+    if (!Array.isArray(matrix?.[role]) || matrix[role].some((key) => !PERMISSION_KEYS.includes(key))) throw new ApiError(400, "Those permissions aren't valid.")
+  }
+  const rows = EDITABLE_ROLES.flatMap((role) => PERMISSION_KEYS.map((key) => [role, key, matrix[role].includes(key) ? 1 : 0]))
+  await query("INSERT INTO role_permissions (role, permission, allowed) VALUES ? ON DUPLICATE KEY UPDATE allowed = VALUES(allowed)", [rows])
+  await loadPermissions()
+  res.json({ matrix: await readPermissionMatrix() })
+})
+
+app.get("/api/security", auth, adminOnly, async (_req, res) => res.json(await readSecurity()))
+
+app.put("/api/security", auth, adminOnly, async (req, res) => {
+  const fields = { security_max_failed_logins: "maxFailedLogins", security_lock_minutes: "lockMinutes", security_session_hours: "sessionHours", security_password_min: "passwordMin" }
+  const values = Object.entries(fields).map(([key, field]) => {
+    const rule = SECURITY_RULES[key]
+    const n = Number(req.body[field])
+    if (!Number.isInteger(n) || n < rule.min || n > rule.max) throw new ApiError(400, `${rule.label} must be a whole number from ${rule.min} to ${rule.max}.`)
+    return [key, String(n)]
+  })
+  await query("INSERT INTO settings (setting_key, setting_value) VALUES ? ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)", [values])
+  res.json(await readSecurity())
+})
+
+// Signs out everyone but the administrator pressing the button.
+app.post("/api/security/end-sessions", auth, adminOnly, async (req, res) => {
+  await query("UPDATE login_logs l JOIN sessions s ON s.login_log_id = l.id SET l.logout_at = NOW() WHERE s.token_hash <> ?", [req.tokenHash])
+  const result = await query("DELETE FROM sessions WHERE token_hash <> ?", [req.tokenHash])
+  res.json({ ended: result.affectedRows })
+})
+
 // --- Accounts & login history (administrator) --------------------------------
 
 app.get("/api/users", auth, adminOnly, async (_req, res) => {
@@ -711,7 +859,7 @@ app.get("/api/users", auth, adminOnly, async (_req, res) => {
       `SELECT u.id, u.full_name AS name, u.username, u.role, u.status, u.created_at AS createdAt, u.last_login_at AS lastLoginAt,
          EXISTS(SELECT 1 FROM sessions s WHERE s.user_id = u.id AND s.expires_at > NOW() AND s.last_seen_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS online,
          (SELECT COUNT(*) FROM login_logs l WHERE l.user_id = u.id AND l.success = 1) AS loginCount
-       FROM users u ORDER BY u.status, FIELD(u.role, 'Administrator', 'Owner', 'Staff'), u.full_name`,
+       FROM users u ORDER BY u.status, FIELD(u.role, 'Administrator', 'Owner', 'Manager', 'Staff'), u.full_name`,
     ),
   )
 })
@@ -721,7 +869,7 @@ function readUserBody(body) {
   const username = text(body.username, "Username", 60)
   const role = body.role
   if (!name || !username) throw new ApiError(400, "Full name and username are required.")
-  if (!["Administrator", "Owner", "Staff"].includes(role)) throw new ApiError(400, "Choose a role.")
+  if (!ROLES.includes(role)) throw new ApiError(400, "Choose a role.")
   return { name, username, role }
 }
 const duplicateUsername = (err) => {
@@ -736,7 +884,7 @@ async function endSessions(userId, keepTokenHash = "") {
 
 app.post("/api/users", auth, adminOnly, async (req, res) => {
   const { name, username, role } = readUserBody(req.body)
-  const hash = await bcrypt.hash(newPassword(req.body.password), 10)
+  const hash = await bcrypt.hash(await newPassword(req.body.password), 10)
   const r = await query("INSERT INTO users (full_name, username, password_hash, role) VALUES (?,?,?,?)", [name, username, hash, role]).catch(duplicateUsername)
   res.status(201).json({ id: r.insertId })
 })
@@ -750,7 +898,7 @@ app.put("/api/users/:id", auth, adminOnly, async (req, res) => {
 })
 
 app.post("/api/users/:id/password", auth, adminOnly, async (req, res) => {
-  const hash = await bcrypt.hash(newPassword(req.body.password), 10)
+  const hash = await bcrypt.hash(await newPassword(req.body.password), 10)
   const result = await query("UPDATE users SET password_hash = ? WHERE id = ?", [hash, req.params.id])
   mustExist(result, "Account not found.")
   await endSessions(req.params.id, Number(req.params.id) === req.user.id ? req.tokenHash : "")
@@ -795,11 +943,12 @@ app.get("/api/search", auth, async (req, res) => {
   const q = single(req.query.q).trim().slice(0, 100)
   if (!q) return res.json({ products: [], sales: [] })
   const like = `%${q}%`
-  const products = await query("SELECT id, name, sku, category, stock FROM products WHERE active = 1 AND (name LIKE ? OR sku LIKE ? OR category LIKE ?) ORDER BY name LIMIT 6", [like, like, like])
-  const own = isManager(req) ? "" : "AND s.user_id = ?"
+  const products = can(req, "inventory.view") ? await query("SELECT id, name, sku, category, stock FROM products WHERE active = 1 AND (name LIKE ? OR sku LIKE ? OR category LIKE ?) ORDER BY name LIMIT 6", [like, like, like]) : []
+  const allSales = can(req, "transactions.all")
+  const own = allSales ? "" : "AND s.user_id = ?"
   const sales = await query(
     `SELECT s.id, s.txn_no AS txnNo, s.total, s.sold_at AS soldAt, s.status FROM sales s WHERE s.txn_no LIKE ? ${own} ORDER BY s.sold_at DESC LIMIT 6`,
-    isManager(req) ? [like] : [like, req.user.id],
+    allSales ? [like] : [like, req.user.id],
   )
   res.json({ products, sales })
 })

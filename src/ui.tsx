@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { ArrowDownRight, ArrowUpRight, Box, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Flame, Loader2, Package, Rocket, Sparkles, Star, Wind, X, Zap } from "lucide-react"
-import { fmtDateTime, initials, peso, type Sale, type Settings } from "./lib"
+import { fmtDateTime, initials, peso, type Role, type Sale, type Settings } from "./lib"
 
 export function Logo({ dark = false }: { dark?: boolean }) {
   return (
@@ -66,6 +66,7 @@ export function FormGroup({ label, hint, wide, children }: { label: string; hint
 }
 
 export type Tone = "success" | "warning" | "danger" | "info" | "neutral"
+export const ROLE_TONE: Record<Role, Tone> = { Administrator: "danger", Owner: "warning", Manager: "success", Staff: "info" }
 export function Badge({ children, tone = "neutral" }: { children: React.ReactNode; tone?: Tone }) {
   return <span className={`badge badge-${tone}`}>{children}</span>
 }

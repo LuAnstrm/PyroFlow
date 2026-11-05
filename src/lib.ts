@@ -1,8 +1,21 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 
-export type Role = "Administrator" | "Owner" | "Staff"
-export type Page = "dashboard" | "pos" | "inventory" | "forecast" | "transactions" | "reports" | "accounts" | "settings"
-export type User = { id: number; name: string; username: string; role: Role; lastLoginAt: string | null; createdAt: string }
+export type Role = "Administrator" | "Owner" | "Manager" | "Staff"
+export type Page = "dashboard" | "pos" | "inventory" | "forecast" | "transactions" | "reports" | "staff" | "accounts" | "security" | "settings"
+export type Permission =
+  | "sales.process"
+  | "transactions.all"
+  | "transactions.refund"
+  | "sales.monitor"
+  | "inventory.view"
+  | "inventory.manage"
+  | "products.edit"
+  | "products.pricing"
+  | "products.remove"
+  | "reports.view"
+  | "forecast.view"
+  | "staff.operations"
+export type User = { id: number; name: string; username: string; role: Role; permissions: Permission[]; lastLoginAt: string | null; createdAt: string }
 export type Product = {
   id: number
   name: string
@@ -129,7 +142,7 @@ export function useFetch<T>(path: string | null) {
   return { data, error, loading, reload }
 }
 
-export type PageParams = { stockFor?: number; search?: string; saleId?: number; section?: string; status?: string; tab?: string; nonce?: number }
+export type PageParams = { stockFor?: number; search?: string; saleId?: number; section?: string; status?: string; tab?: string; cashier?: number; date?: string; nonce?: number }
 export type AppContextValue = {
   user: User
   setUser: (u: User) => void
@@ -140,7 +153,8 @@ export type AppContextValue = {
   toast: (message: string, tone?: "success" | "warning" | "danger") => void
   go: (page: Page, params?: PageParams) => void
   logout: () => void
-  isManager: boolean
+  /** Shapes what the screen offers. The server checks every permission again. */
+  can: (permission: Permission) => boolean
   isAdmin: boolean
 }
 export const AppContext = createContext<AppContextValue | null>(null)

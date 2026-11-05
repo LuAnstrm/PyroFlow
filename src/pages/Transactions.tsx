@@ -7,7 +7,7 @@ import { ReceiptDialog } from "./POS"
 const PAGE_SIZE = 10
 
 function SaleDialog({ saleId, onClose, onChanged }: { saleId: number; onClose: () => void; onChanged: () => void }) {
-  const { isManager, toast, reloadAlerts } = useApp()
+  const { can, toast, reloadAlerts } = useApp()
   const { data: sale, error, reload } = useFetch<Sale>(`/sales/${saleId}`)
   const [printing, setPrinting] = useState(false)
   const [refunding, setRefunding] = useState(false)
@@ -123,7 +123,7 @@ function SaleDialog({ saleId, onClose, onChanged }: { saleId: number; onClose: (
         </form>
       ) : (
         <div className="modal-actions">
-          {isManager && sale.status === "Completed" && (
+          {can("transactions.refund") && sale.status === "Completed" && (
             <Button variant="danger" className="push-left" onClick={() => setRefunding(true)}>
               <RotateCcw size={16} /> Refund
             </Button>
@@ -141,12 +141,13 @@ function SaleDialog({ saleId, onClose, onChanged }: { saleId: number; onClose: (
 }
 
 export function Transactions({ params }: { params: PageParams }) {
-  const { isManager, toast } = useApp()
+  const { can, toast } = useApp()
+  const allSales = can("transactions.all")
   const [search, setSearch] = useState("")
   const [debounced, setDebounced] = useState("")
-  const [from, setFrom] = useState("")
-  const [to, setTo] = useState("")
-  const [cashier, setCashier] = useState("")
+  const [from, setFrom] = useState(params.date ?? "")
+  const [to, setTo] = useState(params.date ?? "")
+  const [cashier, setCashier] = useState(params.cashier ? String(params.cashier) : "")
   const [method, setMethod] = useState("")
   const [status, setStatus] = useState("")
   const [page, setPage] = useState(1)
@@ -167,7 +168,7 @@ export function Transactions({ params }: { params: PageParams }) {
   if (status) filter.set("status", status)
   const filterText = filter.toString()
   const { data, error, loading, reload } = useFetch<Paged<Sale>>(`/sales?page=${page}&size=${PAGE_SIZE}&${filterText}`)
-  const cashiers = useFetch<{ id: number; name: string }[]>(isManager ? "/sales/cashiers" : null)
+  const cashiers = useFetch<{ id: number; name: string }[]>(allSales ? "/sales/cashiers" : null)
 
   const filtered = Boolean(search || from || to || cashier || method || status)
   const clear = () => {
@@ -192,7 +193,7 @@ export function Transactions({ params }: { params: PageParams }) {
 
   return (
     <div className="page-stack">
-      <PageIntro eyebrow="SALES RECORDS" title="Transactions" subtitle={isManager ? "Find a sale, reprint its receipt, or process a refund." : "Your sales and their receipts."}>
+      <PageIntro eyebrow="SALES RECORDS" title="Transactions" subtitle={!allSales ? "Your sales and their receipts." : can("transactions.refund") ? "Find a sale, reprint its receipt, or process a refund." : "Find a sale and reprint its receipt."}>
         <Button variant="secondary" onClick={exportCsv}>
           <Download size={17} /> Export CSV
         </Button>
@@ -208,7 +209,7 @@ export function Transactions({ params }: { params: PageParams }) {
             To
             <Field type="date" value={to} onChange={(e) => setTo(e.target.value)} />
           </label>
-          {isManager && (
+          {allSales && (
             <Select value={cashier} onChange={(e) => setCashier(e.target.value)} aria-label="Filter by cashier">
               <option value="">All cashiers</option>
               {cashiers.data?.map((c) => (

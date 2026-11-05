@@ -33,15 +33,30 @@ If your MySQL login isn't `root` with no password, copy `.env.example` to `.env`
 | --- | --- | --- |
 | Administrator | `Admin123` | `Admin` |
 | Owner | `Owner123` | `Owner` |
+| Manager | `Manager123` | `Manager` |
 | Staff (cashier) | `Staff` | `Staff` |
 
-| | Admin | Owner | Staff |
-| --- | --- | --- | --- |
-| Dashboard with forecast summary, POS, own account | Yes | Yes | Yes |
-| Inventory | Full | Edit, no delete | View only |
-| Transactions | All, can refund | All, can refund | Own sales only |
-| Full forecast, reports, business settings | Yes | Yes | No |
-| Accounts and login history | Yes | No | No |
+These are the default permissions. An administrator can change everything except the last two rows
+under **Permissions & Security**. The server checks them on every request.
+
+| | Admin | Owner | Manager | Staff |
+| --- | --- | --- | --- | --- |
+| Point of Sale and receipts | Yes | Yes | Yes | Yes |
+| Dashboard | Everything | Sales and forecast | Today's sales | Own sales |
+| Inventory | Full | View only | View and update stock | No |
+| Add and update products | Yes | Yes | Yes, first price only | No |
+| Change prices, see costs, remove products | Yes | Yes | No | No |
+| Transactions | All, can refund | All | All, can refund | Own sales only |
+| Forecast, reports, revenue and profit | Yes | Yes | No | No |
+| Staff Operations (cashier activity, end a shift) | Yes | No | Yes | No |
+| Accounts, login history, permissions, security | Yes | No | No | No |
+| Business settings | Yes | No | No | No |
+
+Everyone can edit their own name and password under Settings.
+
+If you already have a database, the API upgrades it the first time it connects and keeps your data.
+That upgrade never creates accounts. To add the demo Manager login to an older database, run
+`npm run db:setup`.
 
 ## Before a demo
 
@@ -54,7 +69,8 @@ If your MySQL login isn't `root` with no password, copy `.env.example` to `.env`
 The app only accepts connections from this computer. To open it from another device on the same
 network, start it with the `FIGMA_DEV_SERVER_HOST` environment variable set to `0.0.0.0`.
 
-Five wrong passwords in a row locks that username for 2 minutes. Restarting the API clears the lock.
+By default, five wrong passwords in a row locks that username for 2 minutes. An administrator can change
+this under Permissions & Security. Restarting the API clears the lock.
 
 To run the optimized build instead of the dev server: `npm run build`, then `npm start`, then open
 http://localhost:4000
@@ -63,8 +79,8 @@ http://localhost:4000
 
 - Passwords are stored as bcrypt hashes. Session tokens are random, stored only as SHA-256 hashes,
   and kept in an HttpOnly cookie that page scripts can't read.
-- Every permission is checked on the server, not just hidden in the UI. Cost prices and per-product
-  sales never reach a Staff account's browser.
+- Every permission is checked on the server, not just hidden in the UI. Cost prices never reach the browser of
+  an account without the pricing permission, and Staff never receive shop-wide sales figures.
 - Sale totals are calculated on the server from database prices. Prices sent by the browser are ignored.
 - All SQL values are passed as parameters, and input is limited to what each column can hold.
 

@@ -30,7 +30,7 @@ type ForecastData = {
 const ACTION_TONE: Record<ProductForecast["action"], Tone> = { "Out of stock": "danger", "Order now": "danger", "Order soon": "warning", "Enough stock": "success" }
 
 export function ForecastPage() {
-  const { go } = useApp()
+  const { go, can } = useApp()
   const [days, setDays] = useState(30)
   const { data: f, error, loading, reload } = useFetch<ForecastData>(`/forecast?days=${days}`)
 
@@ -204,7 +204,7 @@ export function ForecastPage() {
                     <Badge tone={ACTION_TONE[p.action]}>{p.action}</Badge>
                   </td>
                   <td>
-                    {p.reorder > 0 && (
+                    {p.reorder > 0 && can("inventory.manage") && (
                       <Button size="sm" variant="secondary" onClick={() => go("inventory", { stockFor: p.id })}>
                         <PackagePlus size={15} /> Stock in
                       </Button>

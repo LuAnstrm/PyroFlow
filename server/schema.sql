@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   full_name VARCHAR(120) NOT NULL,
   username VARCHAR(60) NOT NULL UNIQUE,
   password_hash VARCHAR(100) NOT NULL,
-  role ENUM('Administrator','Owner','Staff') NOT NULL,
+  role ENUM('Administrator','Owner','Manager','Staff') NOT NULL,
   status ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_login_at DATETIME NULL
@@ -102,6 +102,13 @@ CREATE TABLE IF NOT EXISTS stock_movements (
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (sale_id) REFERENCES sales(id),
   INDEX idx_created (created_at)
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+  role VARCHAR(20) NOT NULL,
+  permission VARCHAR(40) NOT NULL,
+  allowed TINYINT(1) NOT NULL,
+  PRIMARY KEY (role, permission)
 );
 
 CREATE TABLE IF NOT EXISTS settings (

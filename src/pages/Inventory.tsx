@@ -7,7 +7,7 @@ type Movement = { id: number; type: string; change_qty: number; stockAfter: numb
 const MOVE_TONE: Record<string, Tone> = { Restock: "success", Initial: "success", Sale: "info", Refund: "info", Adjustment: "warning", Damaged: "danger" }
 const PAGE_SIZE = 8
 
-function ProductForm({ product, categories, onClose, onSaved }: { product: Product | null; categories: string[]; onClose: () => void; onSaved: () => void }) {
+function ProductForm({ product, categories, canPrice, onClose, onSaved }: { product: Product | null; categories: string[]; canPrice: boolean; onClose: () => void; onSaved: () => void }) {
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -42,12 +42,20 @@ function ProductForm({ product, categories, onClose, onSaved }: { product: Produ
               ))}
             </datalist>
           </FormGroup>
-          <FormGroup label="Selling price (₱)">
-            <Field name="price" type="number" min="0" step="0.01" defaultValue={product?.price} required />
-          </FormGroup>
-          <FormGroup label="Cost price (₱)">
-            <Field name="cost" type="number" min="0" step="0.01" defaultValue={product?.cost} required />
-          </FormGroup>
+          {!product || canPrice ? (
+            <>
+              <FormGroup label="Selling price (₱)">
+                <Field name="price" type="number" min="0" step="0.01" defaultValue={product?.price} required />
+              </FormGroup>
+              <FormGroup label="Cost price (₱)">
+                <Field name="cost" type="number" min="0" step="0.01" defaultValue={product?.cost} required />
+              </FormGroup>
+            </>
+          ) : (
+            <FormGroup label="Selling price (₱)" hint="Only an owner or administrator can change prices.">
+              <Field value={product.price} disabled />
+            </FormGroup>
+          )}
           {!product && (
             <FormGroup label="Opening stock">
               <Field name="stock" type="number" min="0" step="1" defaultValue={0} required />
@@ -148,7 +156,12 @@ function StockForm({ product, initial, onClose, onSaved }: { product: Product; i
 }
 
 export function Inventory({ params }: { params: PageParams }) {
-  const { isManager, isAdmin, toast, reloadAlerts } = useApp()
+  const { can, toast, reloadAlerts } = useApp()
+  const canStock = can("inventory.manage")
+  const canEdit = can("products.edit")
+  const canPrice = can("products.pricing")
+  const canRemove = can("products.remove")
+  const hasActions = canStock || canEdit || canRemove
   const { data: products, error, loading, reload } = useFetch<Product[]>("/products")
   const [search, setSearch] = useState(params.search ?? "")
   const [status, setStatus] = useState(params.status ?? "all")
@@ -166,11 +179,11 @@ export function Inventory({ params }: { params: PageParams }) {
   // including straight after saving.
   const stockForOpened = useRef(false)
   useEffect(() => {
-    if (!params.stockFor || !products || stockForOpened.current) return
+    if (!params.stockFor || !products || !canStock || stockForOpened.current) return
     stockForOpened.current = true
     const p = products.find((x) => x.id === params.stockFor)
     if (p) setStockTarget({ product: p, action: "Restock" })
-  }, [params.stockFor, products])
+  }, [params.stockFor, products, canStock])
 
   const counts = useMemo(
     () => ({
@@ -209,8 +222,8 @@ export function Inventory({ params }: { params: PageParams }) {
     setPage(1)
   }
   const exportProducts = () => {
-    const head = ["Product", "SKU", "Category", "Price", ...(isManager ? ["Cost"] : []), "Stock", "Minimum", "Status", "Sold (30 days)"]
-    downloadCsv("inventory.csv", [head, ...shown.map((p) => [p.name, p.sku, p.category, p.price, ...(isManager ? [p.cost] : []), p.stock, p.min, stockStatus(p).label, p.sold30])])
+    const head = ["Product", "SKU", "Category", "Price", ...(canPrice ? ["Cost"] : []), "Stock", "Minimum", "Status", "Sold (30 days)"]
+    downloadCsv("inventory.csv", [head, ...shown.map((p) => [p.name, p.sku, p.category, p.price, ...(canPrice ? [p.cost] : []), p.stock, p.min, stockStatus(p).label, p.sold30])])
   }
   const exportMoves = async () => {
     try {
@@ -233,8 +246,8 @@ export function Inventory({ params }: { params: PageParams }) {
 
   return (
     <div className="page-stack">
-      <PageIntro eyebrow="STOCK CONTROL" title="Inventory" subtitle={isManager ? "See what's running low, then restock in one click." : "Check what's available. Ask an owner or admin to update stock."}>
-        {isManager && (
+      <PageIntro eyebrow="STOCK CONTROL" title="Inventory" subtitle={canStock ? "See what's running low, then restock in one click." : "See what's in stock and what's running low."}>
+        {canEdit && (
           <Button onClick={() => setForm(null)}>
             <Plus size={17} /> Add product
           </Button>
@@ -253,7 +266,7 @@ export function Inventory({ params }: { params: PageParams }) {
             </span>
           </button>
         ))}
-        {isManager && (
+        {canPrice && (
           <div className="value-card">
             <div className="metric-icon tone-orange">
               <CircleDollarSign size={18} />
@@ -317,7 +330,7 @@ export function Inventory({ params }: { params: PageParams }) {
                   <th>Level vs minimum</th>
                   <th className="num">Sold, 30 days</th>
                   <th className="num">Price</th>
-                  {isManager && <th>Actions</th>}
+                  {hasActions && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -349,21 +362,27 @@ export function Inventory({ params }: { params: PageParams }) {
                       <td className="num">{num(Number(p.sold30))}</td>
                       <td className="num">
                         {peso(p.price)}
-                        {isManager && <small className="cell-sub">Cost {peso(p.cost ?? 0)}</small>}
+                        {canPrice && <small className="cell-sub">Cost {peso(p.cost ?? 0)}</small>}
                       </td>
-                      {isManager && (
+                      {hasActions && (
                         <td>
                           <div className="row-actions">
-                            <Button size="sm" variant="secondary" onClick={() => setStockTarget({ product: p, action: "Restock" })}>
-                              <PackagePlus size={15} /> Stock in
-                            </Button>
-                            <button type="button" title="Adjust stock" aria-label={`Adjust stock for ${p.name}`} onClick={() => setStockTarget({ product: p, action: "Adjustment" })}>
-                              <SlidersHorizontal size={16} />
-                            </button>
-                            <button type="button" title="Edit product" aria-label={`Edit ${p.name}`} onClick={() => setForm(p)}>
-                              <Pencil size={16} />
-                            </button>
-                            {isAdmin && (
+                            {canStock && (
+                              <>
+                                <Button size="sm" variant="secondary" onClick={() => setStockTarget({ product: p, action: "Restock" })}>
+                                  <PackagePlus size={15} /> Stock in
+                                </Button>
+                                <button type="button" title="Adjust stock" aria-label={`Adjust stock for ${p.name}`} onClick={() => setStockTarget({ product: p, action: "Adjustment" })}>
+                                  <SlidersHorizontal size={16} />
+                                </button>
+                              </>
+                            )}
+                            {canEdit && (
+                              <button type="button" title="Edit product" aria-label={`Edit ${p.name}`} onClick={() => setForm(p)}>
+                                <Pencil size={16} />
+                              </button>
+                            )}
+                            {canRemove && (
                               <button type="button" title="Remove product" aria-label={`Remove ${p.name}`} onClick={() => setDeleting(p)}>
                                 <Trash2 size={16} />
                               </button>
@@ -457,6 +476,7 @@ export function Inventory({ params }: { params: PageParams }) {
 
       {form !== undefined && (
         <ProductForm
+          canPrice={canPrice}
           product={form}
           categories={categories}
           onClose={() => setForm(undefined)}
