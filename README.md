@@ -71,6 +71,26 @@ http://localhost:4000
 This is a prototype. Before real use it would also need HTTPS, a MySQL password, and the demo
 accounts and the login page's demo buttons removed.
 
+## Restore the saved database
+
+`database/pyroflow_pos.sql` is a snapshot of the demo database, without any login sessions. To use it
+instead of `npm run db:setup`, run these from the project folder with MySQL running:
+
+```bash
+mysql -u root -e "CREATE DATABASE pyroflow_pos CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+```
+
+```bash
+cmd /c "mysql -u root pyroflow_pos < database\pyroflow_pos.sql"
+```
+
+With XAMPP, `mysql` is at `C:\xampp\mysql\bin\mysql.exe` if the command isn't found. The first command
+fails if `pyroflow_pos` already exists. The sales in the snapshot end on the day it was made, and
+`npm run db:reset` replaces them with freshly generated demo data.
+
+This file holds account password hashes and login history, including IP addresses and devices. It's
+demo data only, so never put real customer or staff records in it while this repository is public.
+
 ## View the database in VS Code
 
 Install a MySQL extension (for example "MySQL" by Weijan Chen), add a connection to
