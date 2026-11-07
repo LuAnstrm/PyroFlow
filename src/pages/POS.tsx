@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react"
 import { createPortal } from "react-dom"
-import { Camera, Check, CreditCard, Globe, Minus, Plus, Printer, Search, ShoppingCart, Trash2, Wallet, X } from "lucide-react"
+import { Camera, Check, CreditCard, Globe, LayoutGrid, Minus, Plus, Printer, Search, ShoppingCart, Trash2, Wallet, X } from "lucide-react"
 import { api, fmtTime, money, peso, useApp, useFetch, type AlertItem, type CartItem, type PaymentMethod, type Product, type Sale } from "../lib"
 import { Badge, Button, ErrorBox, Field, FormError, Loading, Modal, ProductTile, Receipt, Select, Empty } from "../ui"
+import { ProductArt } from "../productArt"
 
 type PaymentOptions = { online: string[]; card: string[] }
 const OTHER = "__other"
@@ -156,6 +157,7 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
 
   const all = products ?? []
   const categories = useMemo(() => ["All", ...new Set(all.map((p) => p.category))], [all])
+  const countIn = (c: string) => (c === "All" ? all.length : all.filter((p) => p.category === c).length)
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase()
     const list = all.filter((p) => (category === "All" || p.category === category) && (p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)))
@@ -258,10 +260,18 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
             </Select>
           </div>
         </div>
-        <div className="category-scroll">
+        <div className="category-tabs" role="tablist" aria-label="Categories">
           {categories.map((c) => (
-            <button type="button" className={category === c ? "active" : ""} onClick={() => setCategory(c)} key={c}>
-              {c}
+            <button type="button" role="tab" aria-selected={category === c} className={category === c ? "active" : ""} onClick={() => setCategory(c)} key={c}>
+              {c === "All" ? (
+                <span className="all-icon">
+                  <LayoutGrid size={16} />
+                </span>
+              ) : (
+                <ProductTile category={c} size={32} />
+              )}
+              <span>{c === "All" ? "All items" : c}</span>
+              <em>{countIn(c)}</em>
             </button>
           ))}
         </div>
@@ -273,20 +283,24 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
               const inCart = cart.find((i) => i.id === p.id)?.qty ?? 0
               const left = p.stock - inCart
               return (
-                <button type="button" className={`product-card ${inCart ? "in-cart" : ""}`} key={p.id} disabled={left <= 0} onClick={() => add(p)}>
-                  <div className="product-card-top">
-                    <ProductTile category={p.category} size={44} />
-                    {p.stock === 0 ? <Badge tone="danger">Sold out</Badge> : p.stock <= p.min ? <Badge tone="warning">Low: {p.stock}</Badge> : inCart > 0 ? <Badge tone="info">{inCart} in cart</Badge> : null}
+                <button type="button" className={`product-card ${inCart ? "in-cart" : ""}`} key={p.id} disabled={left <= 0} onClick={() => add(p)} aria-label={`Add ${p.name}, ${peso(p.price)}`}>
+                  <div className="product-photo">
+                    <ProductArt name={p.name} category={p.category} />
+                    {p.stock > 0 && p.stock <= p.min && <Badge tone="warning">Only {p.stock} left</Badge>}
+                    {inCart > 0 && <span className="qty-bubble">{inCart}</span>}
+                    {p.stock === 0 && <span className="sold-out-veil">Sold out</span>}
                   </div>
-                  <h3>{p.name}</h3>
-                  <small>
-                    {p.sku} · {p.stock} in stock
-                  </small>
-                  <div className="product-card-foot">
-                    <strong>{peso(p.price)}</strong>
-                    <span className="add-chip">
-                      <Plus size={16} />
-                    </span>
+                  <div className="product-info">
+                    <h3>{p.name}</h3>
+                    <small>
+                      {p.sku} · {p.stock} in stock
+                    </small>
+                    <div className="product-card-foot">
+                      <strong>{peso(p.price)}</strong>
+                      <span className="add-chip">
+                        <Plus size={16} />
+                      </span>
+                    </div>
                   </div>
                 </button>
               )
@@ -316,6 +330,7 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
           ) : (
             cart.map((item) => (
               <div className="cart-item" key={item.id}>
+                <ProductTile category={item.category} name={item.name} size={48} />
                 <div className="cart-item-main">
                   <strong>{item.name}</strong>
                   <span>{peso(item.price)} each</span>
