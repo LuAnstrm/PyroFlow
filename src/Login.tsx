@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { AlertTriangle, Boxes, ChevronRight, Database, Eye, EyeOff, ShieldCheck, ShoppingCart, TrendingUp } from "lucide-react"
+import { AlertTriangle, ChevronRight, Database, Eye, EyeOff, KeyRound, LogOut, UserPlus } from "lucide-react"
 import { api, type User } from "./lib"
 import { Button, Field, FormGroup, Logo, Modal } from "./ui"
 
@@ -37,50 +37,7 @@ function FireworksSky() {
   )
 }
 
-export function Login({ onLogin }: { onLogin: (u: User) => void }) {
-  const [username, setUsername] = useState("")
-  const [password, setPassword] = useState("")
-  const [remember, setRemember] = useState(false)
-  const [show, setShow] = useState(false)
-  const [error, setError] = useState("")
-  const [busy, setBusy] = useState(false)
-  const [forgot, setForgot] = useState(false)
-  const [dbDown, setDbDown] = useState(false)
-
-  // Keeps checking, so the notice clears by itself once MySQL and the API are up.
-  useEffect(() => {
-    const check = () =>
-      api("/health")
-        .then(() => setDbDown(false))
-        .catch((e) => setDbDown(e.code === "DB_DOWN"))
-    const first = setTimeout(check, 800)
-    const timer = setInterval(check, 4000)
-    return () => {
-      clearTimeout(first)
-      clearInterval(timer)
-    }
-  }, [])
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setBusy(true)
-    setError("")
-    try {
-      const r = await api<{ user: User }>("/auth/login", { method: "POST", body: { username, password, remember } })
-      onLogin(r.user)
-    } catch (err: any) {
-      if (err.code === "DB_DOWN") setDbDown(true)
-      else setError(err.message)
-    } finally {
-      setBusy(false)
-    }
-  }
-  const useDemo = (u: string, p: string) => {
-    setUsername(u)
-    setPassword(p)
-    setError("")
-  }
-
+function LoginLayout({ children }: { children: React.ReactNode }) {
   return (
     <main className="login-page">
       <section className="login-visual">
@@ -96,101 +53,211 @@ export function Login({ onLogin }: { onLogin: (u: User) => void }) {
           <div className="mobile-logo">
             <Logo dark />
           </div>
-          <h2>Welcome back</h2>
-          <p className="login-subtitle">Sign in to your fireworks shop account.</p>
-          {dbDown && (
-            <div className="setup-notice">
-              <Database size={18} />
-              <div>
-                <b>The database isn't ready</b>
-                <span>
-                  Start your MySQL server, then run <code>npm run db:setup</code> and reload this page.
-                </span>
-              </div>
-            </div>
-          )}
-          <form onSubmit={submit}>
-            <FormGroup label="Username">
-              <Field value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Enter your username" autoComplete="username" required />
-            </FormGroup>
-            <FormGroup label="Password">
-              <div className="password-field">
-                <Field
-                  type={show ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  autoComplete="current-password"
-                  required
-                />
-                <button type="button" onClick={() => setShow(!show)} aria-label={show ? "Hide password" : "Show password"}>
-                  {show ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
-              </div>
-            </FormGroup>
-            <div className="login-options">
-              <label className="check">
-                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> <span>Keep me signed in</span>
-              </label>
-              <button type="button" onClick={() => setForgot(true)}>
-                Forgot password?
-              </button>
-            </div>
-            {error && (
-              <div className="error-message">
-                <AlertTriangle size={17} />
-                {error}
-              </div>
-            )}
-            <Button type="submit" className="login-button" disabled={busy}>
-              {busy ? "Signing in…" : "Sign in"} <ChevronRight size={18} />
-            </Button>
-          </form>
-          <div className="demo-section">
-            <div className="demo-label">
-              <span>Demo accounts</span>
-            </div>
-            <div className="demo-grid">
-              <button type="button" onClick={() => useDemo("Admin123", "Admin")}>
-                <ShieldCheck size={18} />
-                <span>
-                  <b>Admin</b>Full access
-                </span>
-              </button>
-              <button type="button" onClick={() => useDemo("Owner123", "Owner")}>
-                <TrendingUp size={18} />
-                <span>
-                  <b>Owner</b>Business view
-                </span>
-              </button>
-              <button type="button" onClick={() => useDemo("Manager123", "Manager")}>
-                <Boxes size={18} />
-                <span>
-                  <b>Manager</b>Stock &amp; team
-                </span>
-              </button>
-              <button type="button" onClick={() => useDemo("Staff", "Staff")}>
-                <ShoppingCart size={18} />
-                <span>
-                  <b>Staff</b>Cashier
-                </span>
-              </button>
-            </div>
-            <p>Click an account to fill in its login, then press Sign in.</p>
-          </div>
+          {children}
         </div>
       </section>
+    </main>
+  )
+}
+
+function ErrorLine({ message }: { message: string }) {
+  if (!message) return null
+  return (
+    <div className="error-message">
+      <AlertTriangle size={17} />
+      {message}
+    </div>
+  )
+}
+
+function PasswordField({ value, onChange, autoComplete, placeholder, minLength }: { value: string; onChange: (v: string) => void; autoComplete: string; placeholder: string; minLength?: number }) {
+  const [show, setShow] = useState(false)
+  return (
+    <div className="password-field">
+      <Field type={show ? "text" : "password"} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoComplete={autoComplete} minLength={minLength} maxLength={72} required />
+      <button type="button" onClick={() => setShow(!show)} aria-label={show ? "Hide password" : "Show password"}>
+        {show ? <EyeOff size={18} /> : <Eye size={18} />}
+      </button>
+    </div>
+  )
+}
+
+/** Shows a notice while MySQL or the API is down, and clears it by itself once they're up. */
+function useDatabaseCheck() {
+  const [dbDown, setDbDown] = useState(false)
+  useEffect(() => {
+    const check = () =>
+      api("/health")
+        .then(() => setDbDown(false))
+        .catch((e) => setDbDown(e.code === "DB_DOWN"))
+    const first = setTimeout(check, 800)
+    const timer = setInterval(check, 4000)
+    return () => {
+      clearTimeout(first)
+      clearInterval(timer)
+    }
+  }, [])
+  return [dbDown, setDbDown] as const
+}
+
+function DatabaseNotice() {
+  return (
+    <div className="setup-notice">
+      <Database size={18} />
+      <div>
+        <b>The database isn't ready</b>
+        <span>
+          Start your MySQL server, then run <code>npm run db:setup</code> and reload this page.
+        </span>
+      </div>
+    </div>
+  )
+}
+
+export function Login({ onLogin }: { onLogin: (u: User) => void }) {
+  const [mode, setMode] = useState<"signin" | "register">("signin")
+  const [name, setName] = useState("")
+  const [username, setUsername] = useState("")
+  const [password, setPassword] = useState("")
+  const [confirm, setConfirm] = useState("")
+  const [code, setCode] = useState("")
+  const [remember, setRemember] = useState(false)
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [forgot, setForgot] = useState(false)
+  const [dbDown, setDbDown] = useDatabaseCheck()
+  const registering = mode === "register"
+
+  const switchMode = (next: "signin" | "register") => {
+    setMode(next)
+    setError("")
+    setPassword("")
+    setConfirm("")
+  }
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (registering && password !== confirm) {
+      setError("The two passwords don't match.")
+      return
+    }
+    setBusy(true)
+    setError("")
+    try {
+      const r = registering
+        ? await api<{ user: User }>("/auth/register", { method: "POST", body: { name, username, password, code } })
+        : await api<{ user: User }>("/auth/login", { method: "POST", body: { username, password, remember } })
+      onLogin(r.user)
+    } catch (err: any) {
+      if (err.code === "DB_DOWN") setDbDown(true)
+      else setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <LoginLayout>
+      <h2>{registering ? "Create your account" : "Welcome back"}</h2>
+      <p className="login-subtitle">{registering ? "Make your own login, then join your shop with the invite code from the owner." : "Sign in to your fireworks shop account."}</p>
+      {dbDown && <DatabaseNotice />}
+      <form onSubmit={submit}>
+        {registering && (
+          <FormGroup label="Full name">
+            <Field value={name} onChange={(e) => setName(e.target.value)} placeholder="Juan Dela Cruz" autoComplete="name" maxLength={120} required />
+          </FormGroup>
+        )}
+        <FormGroup label="Username">
+          <Field value={username} onChange={(e) => setUsername(e.target.value)} placeholder={registering ? "Letters, numbers, dots or dashes" : "Enter your username"} autoComplete="username" maxLength={60} required />
+        </FormGroup>
+        <FormGroup label="Password">
+          <PasswordField value={password} onChange={setPassword} autoComplete={registering ? "new-password" : "current-password"} placeholder={registering ? "At least 8 characters" : "Enter your password"} minLength={registering ? 8 : undefined} />
+        </FormGroup>
+        {registering ? (
+          <>
+            <FormGroup label="Confirm password">
+              <PasswordField value={confirm} onChange={setConfirm} autoComplete="new-password" placeholder="Type it again" />
+            </FormGroup>
+            <FormGroup label="Invite code (optional)">
+              <Field icon={KeyRound} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="e.g. 7KQ2M9X" maxLength={14} className="code-field" autoComplete="off" />
+            </FormGroup>
+            <p className="login-hint">No code yet? Create your account now and enter the code after you sign in.</p>
+          </>
+        ) : (
+          <div className="login-options">
+            <label className="check">
+              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> <span>Keep me signed in</span>
+            </label>
+            <button type="button" onClick={() => setForgot(true)}>
+              Forgot password?
+            </button>
+          </div>
+        )}
+        <ErrorLine message={error} />
+        <Button type="submit" className="login-button" disabled={busy}>
+          {registering ? (busy ? "Creating account…" : "Create account") : busy ? "Signing in…" : "Sign in"} <ChevronRight size={18} />
+        </Button>
+      </form>
+      <p className="login-switch">
+        {registering ? "Already have an account?" : "New to the shop?"}{" "}
+        <button type="button" onClick={() => switchMode(registering ? "signin" : "register")}>
+          {registering ? "Sign in" : "Create an account"}
+        </button>
+      </p>
       {forgot && (
         <Modal title="Forgot your password?" onClose={() => setForgot(false)} width={440}>
           <p className="modal-text">
-            Passwords can only be reset by an administrator. Ask your admin to open <b>Accounts &amp; Logins</b>, find your name, and choose <b>Reset password</b>. They'll give you a new one to sign in
-            with.
+            Ask the shop owner to open <b>Team &amp; Roles</b>, find your name, and choose <b>Reset password</b>. They'll give you a new one to sign in with.
           </p>
           <div className="modal-actions">
             <Button onClick={() => setForgot(false)}>Got it</Button>
           </div>
         </Modal>
       )}
-    </main>
+    </LoginLayout>
+  )
+}
+
+/** Shown after sign-in to anyone who hasn't joined the shop yet, like entering a class code. */
+export function JoinShop({ user, onJoined, onLogout }: { user: User; onJoined: (u: User) => void; onLogout: () => void }) {
+  const [code, setCode] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setError("")
+    try {
+      const r = await api<{ user: User }>("/join", { method: "POST", body: { code } })
+      onJoined(r.user)
+    } catch (err: any) {
+      setError(err.message)
+      setBusy(false)
+    }
+  }
+  return (
+    <LoginLayout>
+      <div className="join-icon">
+        <UserPlus size={24} />
+      </div>
+      <h2>Join your shop</h2>
+      <p className="login-subtitle">Hi {user.name.split(" ")[0]}! Enter the invite code the shop owner gave you. The code decides your role, like Cashier or Inventory Clerk.</p>
+      <form onSubmit={submit}>
+        <FormGroup label="Invite code">
+          <Field icon={KeyRound} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="e.g. 7KQ2M9X" maxLength={14} className="code-field" autoComplete="off" autoFocus required />
+        </FormGroup>
+        <ErrorLine message={error} />
+        <Button type="submit" className="login-button" disabled={busy}>
+          {busy ? "Joining…" : "Join shop"} <ChevronRight size={18} />
+        </Button>
+      </form>
+      <p className="login-hint">No code? Ask the owner to open Team &amp; Roles, then Invite codes, and make one for your role.</p>
+      <p className="login-switch">
+        Signed in as @{user.username}.{" "}
+        <button type="button" onClick={onLogout}>
+          <LogOut size={14} /> Log out
+        </button>
+      </p>
+    </LoginLayout>
   )
 }

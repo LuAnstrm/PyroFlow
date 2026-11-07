@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { Check, LockKeyhole, LogOut, RotateCcw } from "lucide-react"
-import { api, useApp, useFetch, type Role } from "../lib"
+import { Check, LockKeyhole, LogOut } from "lucide-react"
+import { api, useApp, useFetch } from "../lib"
 import {
   Button,
   Card,
@@ -14,150 +14,11 @@ import {
   PageIntro,
 } from "../ui"
 
-type Permission = {
-  key: string
-  group: string
-  label: string
-  help: string
-  defaults: Role[]
-}
-type Matrix = Record<string, string[]>
-type PermissionData = { roles: Role[]; catalog: Permission[]; matrix: Matrix }
 type Rules = {
   maxFailedLogins: number
   lockMinutes: number
   sessionHours: number
   passwordMin: number
-}
-
-const sameMatrix = (a: Matrix, b: Matrix) =>
-  Object.keys(a).every(
-    (role) => [...a[role]].sort().join() === [...b[role]].sort().join(),
-  )
-
-function Permissions() {
-  const { toast } = useApp()
-  const { data, error, loading, reload } =
-    useFetch<PermissionData>("/permissions")
-  const [draft, setDraft] = useState<Matrix | null>(null)
-  const [saveError, setSaveError] = useState("")
-  const [busy, setBusy] = useState(false)
-  useEffect(() => {
-    if (data) setDraft(data.matrix)
-  }, [data])
-
-  if (error && !data) return <ErrorBox message={error} onRetry={reload} />
-  if ((loading && !data) || !data || !draft) return <Loading />
-
-  const toggle = (role: string, key: string, on: boolean) =>
-    setDraft({
-      ...draft,
-      [role]: on ? [...draft[role], key] : draft[role].filter((k) => k !== key),
-    })
-  const defaults = () =>
-    Object.fromEntries(
-      data.roles.map((role) => [
-        role,
-        data.catalog.filter((p) => p.defaults.includes(role)).map((p) => p.key),
-      ]),
-    )
-  const dirty = !sameMatrix(draft, data.matrix)
-  const groups = [...new Set(data.catalog.map((p) => p.group))]
-
-  const save = async () => {
-    setBusy(true)
-    setSaveError("")
-    try {
-      await api("/permissions", { method: "PUT", body: { matrix: draft } })
-      toast("Permissions saved. They apply right away.")
-      reload()
-    } catch (e: any) {
-      setSaveError(e.message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Card>
-      <CardHead
-        title="Role permissions"
-        subtitle="Choose what each role can do. Administrators always have full access, and only they can manage accounts, settings and security."
-        action={
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setDraft(defaults())}
-          >
-            <RotateCcw size={15} /> Use defaults
-          </Button>
-        }
-      />
-      <div className="table-scroll">
-        <table className="permission-table">
-          <thead>
-            <tr>
-              <th>Permission</th>
-              <th>Administrator</th>
-              {data.roles.map((role) => (
-                <th key={role}>{role}</th>
-              ))}
-            </tr>
-          </thead>
-          {groups.map((group) => (
-            <tbody key={group}>
-              <tr className="permission-group">
-                <th colSpan={data.roles.length + 2} scope="colgroup">
-                  {group}
-                </th>
-              </tr>
-              {data.catalog
-                .filter((p) => p.group === group)
-                .map((p) => (
-                  <tr key={p.key}>
-                    <td>
-                      <b>{p.label}</b>
-                      <small className="cell-sub">{p.help}</small>
-                    </td>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked
-                        disabled
-                        aria-label={`${p.label} for Administrator, always on`}
-                      />
-                    </td>
-                    {data.roles.map((role) => (
-                      <td key={role}>
-                        <input
-                          type="checkbox"
-                          checked={draft[role].includes(p.key)}
-                          onChange={(e) =>
-                            toggle(role, p.key, e.target.checked)
-                          }
-                          aria-label={`${p.label} for ${role}`}
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-            </tbody>
-          ))}
-        </table>
-      </div>
-      <div className="settings-actions">
-        <FormError message={saveError} />
-        {dirty && (
-          <Button variant="ghost" onClick={() => setDraft(data.matrix)}>
-            Discard
-          </Button>
-        )}
-        <Button onClick={save} disabled={busy || !dirty}>
-          <Check size={16} /> Save permissions
-        </Button>
-      </div>
-    </Card>
-  )
 }
 
 function SecurityRules() {
@@ -250,7 +111,7 @@ function SecurityRules() {
         <div className="settings-actions security-actions">
           <Button
             variant="secondary"
-            onClick={() => go("accounts", { tab: "logins" })}
+            onClick={() => go("team", { tab: "logins" })}
           >
             <LockKeyhole size={16} /> Review login history
           </Button>
@@ -288,31 +149,10 @@ function SecurityRules() {
 }
 
 export function SecurityPage() {
-  const [tab, setTab] = useState<"permissions" | "security">("permissions")
   return (
     <div className="page-stack">
-      <PageIntro
-        eyebrow="ADMIN ONLY"
-        title="Permissions & security"
-        subtitle="Decide what each role can do and how people sign in."
-      />
-      <div className="segmented tabs">
-        <button
-          type="button"
-          className={tab === "permissions" ? "active" : ""}
-          onClick={() => setTab("permissions")}
-        >
-          Permissions
-        </button>
-        <button
-          type="button"
-          className={tab === "security" ? "active" : ""}
-          onClick={() => setTab("security")}
-        >
-          Security
-        </button>
-      </div>
-      {tab === "permissions" ? <Permissions /> : <SecurityRules />}
+      <PageIntro eyebrow="OWNER ONLY" title="Security" subtitle="Decide how people sign in. What each role can do is set under Team & Roles." />
+      <SecurityRules />
     </div>
   )
 }

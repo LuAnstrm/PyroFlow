@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react"
-import { Bell, Check, ChevronRight, CircleCheck, CircleX, CircleDollarSign, Flame, LogOut, ReceiptText, UserCog } from "lucide-react"
+import { Bell, Wallet, Check, ChevronRight, CircleCheck, CircleX, CircleDollarSign, Flame, LogOut, ReceiptText, UserCog } from "lucide-react"
 import { api, fmtDateTime, money, useApp, useFetch, type PageParams, type Sale, type Settings as SettingsMap } from "../lib"
-import { Avatar, Badge, Button, Card, CardHead, Field, FormError, FormGroup, PageIntro, Receipt, ROLE_TONE } from "../ui"
+import { Avatar, Badge, Button, Card, CardHead, Field, FormError, FormGroup, PageIntro, Receipt, RoleBadge } from "../ui"
 
 const SECTIONS = [
-  { id: "shop", label: "Business details", icon: Flame, adminOnly: true },
-  { id: "receipt", label: "Receipts", icon: ReceiptText, adminOnly: true },
-  { id: "tax", label: "Tax", icon: CircleDollarSign, adminOnly: true },
-  { id: "alerts", label: "Inventory alerts", icon: Bell, adminOnly: true },
-  { id: "account", label: "My account", icon: UserCog, adminOnly: false },
+  { id: "shop", label: "Business details", icon: Flame, ownerOnly: true },
+  { id: "receipt", label: "Receipts", icon: ReceiptText, ownerOnly: true },
+  { id: "tax", label: "Tax", icon: CircleDollarSign, ownerOnly: true },
+  { id: "alerts", label: "Inventory alerts", icon: Bell, ownerOnly: true },
+  { id: "payments", label: "Payments", icon: Wallet, ownerOnly: true },
+  { id: "account", label: "My account", icon: UserCog, ownerOnly: false },
 ]
 
 const SAMPLE_SALE: Sale = {
@@ -22,9 +23,12 @@ const SAMPLE_SALE: Sale = {
   taxAmount: 42,
   total: 392,
   method: "Cash",
+  provider: null,
   tendered: 400,
   changeDue: 8,
   reference: null,
+  payerAccount: null,
+  hasProof: false,
   status: "Completed",
   refundedAt: null,
   refundReason: null,
@@ -99,7 +103,7 @@ function MyAccount() {
         <div>
           <h3>{user.name}</h3>
           <p>
-            @{user.username} · <Badge tone={ROLE_TONE[user.role]}>{user.role}</Badge>
+            @{user.username} · <RoleBadge role={user.role} isOwner={user.isOwner} />
           </p>
         </div>
         <Button variant="danger" onClick={logout}>
@@ -156,8 +160,8 @@ function MyAccount() {
 }
 
 export function SettingsPage({ params }: { params: PageParams }) {
-  const { isAdmin, settings, reloadSettings, reloadAlerts, toast } = useApp()
-  const sections = SECTIONS.filter((s) => isAdmin || !s.adminOnly)
+  const { isOwner, settings, reloadSettings, reloadAlerts, toast } = useApp()
+  const sections = SECTIONS.filter((s) => isOwner || !s.ownerOnly)
   const [section, setSection] = useState(params.section && sections.some((s) => s.id === params.section) ? params.section : sections[0].id)
   const [draft, setDraft] = useState<SettingsMap>(settings)
   const [error, setError] = useState("")
@@ -201,7 +205,7 @@ export function SettingsPage({ params }: { params: PageParams }) {
 
   return (
     <div className="page-stack">
-      <PageIntro eyebrow="CONFIGURATION" title="Settings" subtitle={isAdmin ? "Manage business details, receipts, alerts, and your account." : "Manage your account."} />
+      <PageIntro eyebrow="CONFIGURATION" title="Settings" subtitle={isOwner ? "Manage business details, receipts, alerts, and your account." : "Manage your account."} />
       <div className={`settings-layout ${sections.length === 1 ? "single" : ""}`}>
         {sections.length > 1 && (
           <aside className="settings-nav">
@@ -278,6 +282,17 @@ export function SettingsPage({ params }: { params: PageParams }) {
                       <Field {...text("tax_rate")} type="number" min="0" max="50" step="0.01" required />
                     </FormGroup>
                   </div>
+                  {saveBar}
+                </Card>
+              )}
+              {section === "payments" && (
+                <Card>
+                  <CardHead title={active.label} subtitle="How online and card payments are recorded at the Point of Sale" />
+                  <Toggle
+                    title="Require a photo of online payments"
+                    help="The cashier must take a photo or upload a screenshot of the GCash, Maya or bank confirmation before the sale can be completed. Card payments can always add a photo of the terminal slip."
+                    {...flag("require_payment_proof")}
+                  />
                   {saveBar}
                 </Card>
               )}

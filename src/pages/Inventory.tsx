@@ -52,7 +52,7 @@ function ProductForm({ product, categories, canPrice, onClose, onSaved }: { prod
               </FormGroup>
             </>
           ) : (
-            <FormGroup label="Selling price (₱)" hint="Only an owner or administrator can change prices.">
+            <FormGroup label="Selling price (₱)" hint="Only someone with the Manage pricing permission can change prices.">
               <Field value={product.price} disabled />
             </FormGroup>
           )}

@@ -27,36 +27,63 @@ React + Vite frontend, Node/Express API, MySQL database.
 If your MySQL login isn't `root` with no password, copy `.env.example` to `.env` and edit it.
 `npm run db:reset` deletes the database and creates it again from scratch.
 
+## Team, roles and invite codes
+
+There's one **Owner** role with full access. Everyone else gets a role the owner makes, with only the
+features that job needs. It works like a classroom code:
+
+1. Each person makes their own login: **Create an account** on the sign-in page.
+2. The owner opens **Team & Roles → Invite codes**, makes a code for a role (for example Cashier), and
+   gives it to them. A code can expire after 1, 7 or 30 days and be limited to a number of people.
+3. The person types the code, during sign-up or after signing in, and joins with that role.
+
+The owner can make new roles, change what any role can do, move people between roles, and remove
+someone from the shop. A removed person keeps their account and past sales and can rejoin with a new
+code. In an empty database the first person to register becomes the Owner.
+
+The shop starts with these roles. The owner can change any of them under **Team & Roles → Roles**.
+The server checks every permission on every request.
+
+| | Owner | Manager | Cashier | Inventory Clerk |
+| --- | --- | --- | --- | --- |
+| Point of Sale and receipts | Yes | Yes | Yes | No |
+| Transactions | All, can refund | All, can refund | Own sales only | No |
+| Dashboard | Everything | Shop sales | Own sales | Stock only |
+| Inventory, stock in, damaged, counts | Yes | Yes | No | Yes |
+| Add and update products | Yes | Yes, first price only | No | Yes, first price only |
+| Change prices, see costs, remove products | Yes | No | No | No |
+| Forecast, reports, revenue and profit | Yes | No | No | No |
+| Staff Operations (cashier activity, end a shift) | Yes | Yes | No | No |
+| Team & Roles, invite codes, security, business settings | Yes | No | No | No |
+
+Everyone can edit their own name and password under Settings.
+
 ## Demo accounts
 
 | Role | Username | Password |
 | --- | --- | --- |
-| Administrator | `Admin123` | `Admin` |
 | Owner | `Owner123` | `Owner` |
 | Manager | `Manager123` | `Manager` |
-| Staff (cashier) | `Staff` | `Staff` |
+| Cashier | `Staff` | `Staff` |
+| Inventory Clerk | `Inventory123` | `Inventory` |
+| Registered, not in the shop yet | `paolo.garcia` | `Newhire1234` |
 
-These are the default permissions. An administrator can change everything except the last two rows
-under **Permissions & Security**. The server checks them on every request.
+Demo invite codes: `CASHIER` (Cashier) and `STOCKRM` (Inventory Clerk). Codes you make yourself are random.
 
-| | Admin | Owner | Manager | Staff |
-| --- | --- | --- | --- | --- |
-| Point of Sale and receipts | Yes | Yes | Yes | Yes |
-| Dashboard | Everything | Sales and forecast | Today's sales | Own sales |
-| Inventory | Full | View only | View and update stock | No |
-| Add and update products | Yes | Yes | Yes, first price only | No |
-| Change prices, see costs, remove products | Yes | Yes | No | No |
-| Transactions | All, can refund | All | All, can refund | Own sales only |
-| Forecast, reports, revenue and profit | Yes | Yes | No | No |
-| Staff Operations (cashier activity, end a shift) | Yes | No | Yes | No |
-| Accounts, login history, permissions, security | Yes | No | No | No |
-| Business settings | Yes | No | No | No |
+If you already have a database, the API upgrades it the first time it connects and keeps your data:
+Administrator and Owner accounts become Owner, Staff become Cashier, and saved Manager and Staff
+permissions carry over. That upgrade never creates accounts.
 
-Everyone can edit their own name and password under Settings.
+## Payments
 
-If you already have a database, the API upgrades it the first time it connects and keeps your data.
-That upgrade never creates accounts. To add the demo Manager login to an older database, run
-`npm run db:setup`.
+Online payments record the exact provider (GCash, Maya, GoTyme, ShopeePay, GrabPay, QR Ph, or a bank
+such as BDO or BPI, or any name typed under Other), the reference number, who paid, and a photo or
+screenshot of the payment. Card payments record the card type (Visa, Mastercard, JCB, ...), the approval
+code, the last 4 digits and an optional photo of the terminal slip. The photo is required for online
+payments unless the owner turns that off under **Settings → Payments**.
+
+Photos are shrunk in the browser and stored in the `payment_proofs` table. Open one from the sale in
+**Transactions**. They're kept under 700 KB because XAMPP's MySQL only accepts 1 MB per statement.
 
 ## Before a demo
 
@@ -69,8 +96,8 @@ That upgrade never creates accounts. To add the demo Manager login to an older d
 The app only accepts connections from this computer. To open it from another device on the same
 network, start it with the `FIGMA_DEV_SERVER_HOST` environment variable set to `0.0.0.0`.
 
-By default, five wrong passwords in a row locks that username for 2 minutes. An administrator can change
-this under Permissions & Security. Restarting the API clears the lock.
+By default, five wrong passwords in a row locks that username for 2 minutes. The owner can change
+this under Security. Restarting the API clears the lock.
 
 To run the optimized build instead of the dev server: `npm run build`, then `npm start`, then open
 http://localhost:4000
@@ -80,12 +107,12 @@ http://localhost:4000
 - Passwords are stored as bcrypt hashes. Session tokens are random, stored only as SHA-256 hashes,
   and kept in an HttpOnly cookie that page scripts can't read.
 - Every permission is checked on the server, not just hidden in the UI. Cost prices never reach the browser of
-  an account without the pricing permission, and Staff never receive shop-wide sales figures.
+  an account without the pricing permission, and roles without "Monitor daily sales" never receive shop-wide sales figures.
 - Sale totals are calculated on the server from database prices. Prices sent by the browser are ignored.
 - All SQL values are passed as parameters, and input is limited to what each column can hold.
 
 This is a prototype. Before real use it would also need HTTPS, a MySQL password, and the demo
-accounts and the login page's demo buttons removed.
+accounts and demo invite codes removed. Invite codes also count toward the sign-in lock, so they can't be guessed by trying many.
 
 ## Restore the saved database
 

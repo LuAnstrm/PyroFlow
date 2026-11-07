@@ -25,13 +25,14 @@ const PRODUCTS = [
 ]
 
 const USERS = [
-  // The demo logins from the original prototype.
-  ["Alex Rivera", "Admin123", "Admin", "Administrator", "Active"],
+  // name, username, password, role (null = registered but hasn't joined yet), status
   ["Sofia Reyes", "Owner123", "Owner", "Owner", "Active"],
   ["Marco Dela Cruz", "Manager123", "Manager", "Manager", "Active"],
-  ["Mia Santos", "Staff", "Staff", "Staff", "Active"],
-  ["John Cruz", "john.cruz", "Staff1234", "Staff", "Active"],
-  ["Elena Lim", "elena.lim", "Staff1234", "Staff", "Inactive"],
+  ["Mia Santos", "Staff", "Staff", "Cashier", "Active"],
+  ["John Cruz", "john.cruz", "Staff1234", "Cashier", "Active"],
+  ["Ramon Bautista", "Inventory123", "Inventory", "Inventory Clerk", "Active"],
+  ["Elena Lim", "elena.lim", "Staff1234", "Cashier", "Inactive"],
+  ["Paolo Garcia", "paolo.garcia", "Newhire1234", null, "Active"],
 ]
 
 const SETTINGS = {
@@ -114,12 +115,23 @@ function buildHistory(today, products, staffIds, taxRate) {
       const total = money(subtotal - discount + tax)
       const method = ["Cash", "Online Payment", "Card"][pick([6, 3, 2])]
       const refunded = rand() < 0.012
-      sales.push({ when, items, subtotal, discountPct, discount, tax, total, method, refunded, user: staffIds[pick([3, 2])] })
+      const provider = method === "Online Payment" ? ONLINE[pick([8, 4, 1, 1, 1, 1])] : method === "Card" ? CARDS[pick([5, 4, 1])] : null
+      const account = method === "Card" ? String(1000 + Math.floor(rand() * 9000)) : method === "Online Payment" ? `09${17 + Math.floor(rand() * 80)} *** ${String(Math.floor(rand() * 10000)).padStart(4, "0")}` : null
+      sales.push({ when, items, subtotal, discountPct, discount, tax, total, method, provider, account, refunded, user: staffIds[pick([3, 2])] })
     }
   }
   sales.sort((a, b) => a.when - b.when)
   return sales
 }
+
+const ONLINE = ["GCash", "Maya", "GoTyme", "BDO", "BPI", "ShopeePay"]
+const CARDS = ["Visa", "Mastercard", "JCB"]
+
+/** Fixed demo invite codes, so the README can name them. Real codes are random. */
+const INVITES = [
+  ["CASHIER", "Cashier"],
+  ["STOCKRM", "Inventory Clerk"],
+]
 
 const sqlDate = (d) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
@@ -143,14 +155,6 @@ async function main() {
 
   const [[{ n }]] = await conn.query("SELECT COUNT(*) AS n FROM users")
   if (n > 0) {
-    // An older demo database has no Manager, and the login page offers one. This only runs
-    // when someone asks for db:setup; the API's own upgrade never creates accounts.
-    const manager = USERS.find((u) => u[3] === "Manager")
-    const [managers] = await conn.query("SELECT id FROM users WHERE role = 'Manager' OR username = ?", [manager[1]])
-    if (!managers.length) {
-      await conn.query("INSERT INTO users (full_name, username, password_hash, role, status) VALUES (?,?,?,?,?)", [manager[0], manager[1], await bcrypt.hash(manager[2], 10), manager[3], manager[4]])
-      console.log(`Added the demo Manager account (${manager[1]}).`)
-    }
     console.log(`Database "${dbName}" already has data, so it was only upgraded. Your data wasn't changed.`)
     console.log("Run `npm run db:reset` to delete it and start over.")
     await conn.end()
@@ -158,13 +162,17 @@ async function main() {
   }
 
   const now = new Date()
+  const [roles] = await conn.query("SELECT id, name FROM roles")
+  const rid = Object.fromEntries(roles.map((r) => [r.name, r.id]))
   const userRows = []
   for (const [name, username, password, role, status] of USERS) {
-    userRows.push([name, username, await bcrypt.hash(password, 10), role, status, sqlDate(new Date(now.getTime() - 500 * 86400000))])
+    const created = sqlDate(new Date(now.getTime() - (role ? 500 : 1) * 86400000))
+    userRows.push([name, username, await bcrypt.hash(password, 10), role ? rid[role] : null, status, created, role ? created : null])
   }
-  await conn.query("INSERT INTO users (full_name, username, password_hash, role, status, created_at) VALUES ?", [userRows])
+  await conn.query("INSERT INTO users (full_name, username, password_hash, role_id, status, created_at, joined_at) VALUES ?", [userRows])
   const [users] = await conn.query("SELECT id, username FROM users ORDER BY id")
   const uid = Object.fromEntries(users.map((u) => [u.username, u.id]))
+  await conn.query("INSERT INTO invites (code, role_id, created_by) VALUES ?", [INVITES.map(([code, role]) => [code, rid[role], uid.Owner123])])
 
   await conn.query("INSERT INTO products (name, sku, category, price, cost, stock, min_stock) VALUES ?", [
     PRODUCTS.map((p) => p.slice(0, 7)),
@@ -180,17 +188,18 @@ async function main() {
   const saleRows = sales.map((s, i) => {
     const id = i + 1
     return [
-      id, `TXN-${s.when.getFullYear()}-${String(id).padStart(6, "0")}`, s.user, sqlDate(s.when), s.subtotal, s.discountPct, s.discount, taxRate, s.tax, s.total, s.method,
+      id, `TXN-${s.when.getFullYear()}-${String(id).padStart(6, "0")}`, s.user, sqlDate(s.when), s.subtotal, s.discountPct, s.discount, taxRate, s.tax, s.total, s.method, s.provider,
       s.method === "Cash" ? Math.ceil(s.total / 100) * 100 : null,
       s.method === "Cash" ? money(Math.ceil(s.total / 100) * 100 - s.total) : null,
-      s.method === "Cash" ? null : `REF${100000 + id}`,
+      s.method === "Cash" ? null : s.method === "Card" ? String(100000 + ((id * 7919) % 900000)) : `${s.provider === "GCash" ? "" : "REF"}${String(1000000000000 + id * 7919).slice(-13)}`,
+      s.account,
       s.refunded ? "Refunded" : "Completed",
       s.refunded ? sqlDate(s.when) : null,
       s.refunded ? uid.Owner123 : null,
       s.refunded ? "Customer returned the item" : null,
     ]
   })
-  await insertBatched(conn, `INSERT INTO sales (id, txn_no, user_id, sold_at, subtotal, discount_pct, discount_amount, tax_rate, tax_amount, total, payment_method, amount_tendered, change_due, payment_reference, status, refunded_at, refunded_by, refund_reason) VALUES ?`, saleRows)
+  await insertBatched(conn, `INSERT INTO sales (id, txn_no, user_id, sold_at, subtotal, discount_pct, discount_amount, tax_rate, tax_amount, total, payment_method, payment_provider, amount_tendered, change_due, payment_reference, payment_account, status, refunded_at, refunded_by, refund_reason) VALUES ?`, saleRows)
 
   const itemRows = []
   sales.forEach((s, i) => {
@@ -212,7 +221,7 @@ async function main() {
   PRODUCTS.forEach((p, idx) => {
     for (let w = 0; w < 4; w++) {
       const when = new Date(now.getTime() - (w * 7 + 2 + idx * 0.4) * 86400000)
-      events.push({ when, idx, change: Math.max(12, Math.round(p[7] * 22)), type: "Restock", note: "Supplier delivery", user: uid.Owner123, sale: null })
+      events.push({ when, idx, change: Math.max(12, Math.round(p[7] * 22)), type: "Restock", note: "Supplier delivery", user: uid.Inventory123, sale: null })
     }
   })
   const special = [
@@ -220,7 +229,7 @@ async function main() {
     [7, 5, -3, "Adjustment", "Physical count correction"],
   ]
   for (const [idx, ago, change, type, note] of special) {
-    events.push({ when: new Date(now.getTime() - ago * 86400000), idx, change, type, note, user: uid.Owner123, sale: null })
+    events.push({ when: new Date(now.getTime() - ago * 86400000), idx, change, type, note, user: uid.Inventory123, sale: null })
   }
   events.sort((a, b) => b.when - a.when)
   const running = PRODUCTS.map((p) => p[5])
