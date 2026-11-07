@@ -1,8 +1,88 @@
 import { useEffect, useMemo, useState } from "react"
 import { createPortal } from "react-dom"
-import { Check, CreditCard, Globe, Minus, Plus, Printer, Search, ShoppingCart, Trash2, Wallet } from "lucide-react"
+import { Camera, Check, CreditCard, Globe, Minus, Plus, Printer, Search, ShoppingCart, Trash2, Wallet, X } from "lucide-react"
 import { api, fmtTime, money, peso, useApp, useFetch, type AlertItem, type CartItem, type PaymentMethod, type Product, type Sale } from "../lib"
 import { Badge, Button, ErrorBox, Field, FormError, Loading, Modal, ProductTile, Receipt, Select, Empty } from "../ui"
+
+type PaymentOptions = { online: string[]; card: string[] }
+const OTHER = "__other"
+const BANKS = new Set(["BDO", "BPI", "UnionBank", "Metrobank", "Landbank", "Security Bank"])
+// Kept under the server's limit, which is small because XAMPP's MySQL takes 1 MB per statement.
+const MAX_PHOTO_BYTES = 550 * 1024
+
+/** Reads a photo or screenshot and shrinks it to a JPEG small enough to store with the sale. */
+async function shrinkPhoto(file: File): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error("Couldn't read that file."))
+    reader.readAsDataURL(file)
+  })
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const i = new Image()
+    i.onload = () => resolve(i)
+    i.onerror = () => reject(new Error("That file isn't a photo the browser can open. Use a JPEG or PNG."))
+    i.src = dataUrl
+  })
+  let longest = 1400
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const scale = Math.min(1, longest / Math.max(img.naturalWidth, img.naturalHeight))
+    const canvas = document.createElement("canvas")
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
+    const ctx = canvas.getContext("2d")!
+    ctx.fillStyle = "#fff"
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    const out = canvas.toDataURL("image/jpeg", 0.8)
+    if ((out.length - out.indexOf(",") - 1) * 0.75 <= MAX_PHOTO_BYTES) return out
+    longest = Math.round(longest * 0.75)
+  }
+  throw new Error("That photo is too large. Try a screenshot instead.")
+}
+
+function PhotoPicker({ value, onChange, required, label }: { value: string; onChange: (v: string) => void; required: boolean; label: string }) {
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const pick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ""
+    if (!file) return
+    setBusy(true)
+    setError("")
+    try {
+      onChange(await shrinkPhoto(file))
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="proof-picker">
+      {value ? (
+        <div className="proof-thumb">
+          <img src={value} alt="Payment proof" />
+          <span>
+            <b>Photo added</b>
+            <small>Saved with the sale</small>
+          </span>
+          <button type="button" onClick={() => onChange("")} aria-label="Remove photo">
+            <X size={16} />
+          </button>
+        </div>
+      ) : (
+        <label className={`proof-button ${busy ? "busy" : ""}`}>
+          <Camera size={17} />
+          <span>{busy ? "Preparing photo…" : label}</span>
+          {required ? <em>Required</em> : <small>Optional</small>}
+          <input type="file" accept="image/*" onChange={pick} disabled={busy} />
+        </label>
+      )}
+      {error && <small className="proof-error">{error}</small>}
+    </div>
+  )
+}
 
 const METHODS: { id: PaymentMethod; icon: React.ElementType }[] = [
   { id: "Cash", icon: Wallet },
@@ -48,6 +128,12 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
   const [method, setMethod] = useState<PaymentMethod>("Cash")
   const [cash, setCash] = useState("")
   const [reference, setReference] = useState("")
+  const { data: options } = useFetch<PaymentOptions>("/payment-options")
+  const [provider, setProvider] = useState("GCash")
+  const [otherProvider, setOtherProvider] = useState("")
+  const [card, setCard] = useState("Visa")
+  const [account, setAccount] = useState("")
+  const [proof, setProof] = useState("")
   const [formError, setFormError] = useState("")
   const [busy, setBusy] = useState(false)
   const [receipt, setReceipt] = useState<Sale | null>(null)
@@ -108,9 +194,11 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
   const tax = money(((subtotal - discountAmt) * taxRate) / 100)
   const total = money(subtotal - discountAmt + tax)
   const cashValue = Number(cash)
-  const needsRef = method !== "Cash"
   const short = method === "Cash" && cash !== "" && cashValue < total
-  const ready = cart.length > 0 && (method === "Cash" ? cashValue >= total : reference.trim() !== "")
+  const proofRequired = method === "Online Payment" && settings.require_payment_proof === "1"
+  const providerName = method === "Card" ? card : provider === OTHER ? otherProvider.trim() : provider
+  const last4Bad = method === "Card" && account !== "" && !/^\d{4}$/.test(account)
+  const ready = cart.length > 0 && (method === "Cash" ? cashValue >= total : providerName !== "" && reference.trim() !== "" && !last4Bad && (!proofRequired || proof !== ""))
 
   const complete = async () => {
     setBusy(true)
@@ -118,12 +206,20 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
     try {
       const { sale, newAlerts } = await api<{ sale: Sale; newAlerts: AlertItem[] }>("/sales", {
         method: "POST",
-        body: { items: cart.map((i) => ({ productId: i.id, qty: i.qty })), discountPct: discount, method, tendered: cashValue, reference },
+        body: {
+          items: cart.map((i) => ({ productId: i.id, qty: i.qty })),
+          discountPct: discount,
+          method,
+          tendered: cashValue,
+          ...(method === "Cash" ? {} : { provider: providerName, reference, account, proof: proof || undefined }),
+        },
       })
       setReceipt(sale)
       setCart([])
       setCash("")
       setReference("")
+      setAccount("")
+      setProof("")
       setDiscount(0)
       reload()
       reloadAlerts()
@@ -304,16 +400,39 @@ export function POS({ cart, setCart }: { cart: CartItem[]; setCart: React.Dispat
                 <strong>{peso(short ? total - cashValue : Math.max(0, cashValue - total))}</strong>
               </div>
             </>
+          ) : method === "Online Payment" ? (
+            <div className="pay-details">
+              <Select value={provider} onChange={(e) => setProvider(e.target.value)} aria-label="Paid with">
+                <optgroup label="E-wallets">
+                  {(options?.online ?? ["GCash", "Maya"]).filter((p) => !BANKS.has(p)).map((p) => (
+                    <option key={p}>{p}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="Bank transfer">
+                  {(options?.online ?? []).filter((p) => BANKS.has(p)).map((p) => (
+                    <option key={p}>{p}</option>
+                  ))}
+                </optgroup>
+                <option value={OTHER}>Other…</option>
+              </Select>
+              {provider === OTHER && <Field value={otherProvider} onChange={(e) => setOtherProvider(e.target.value)} maxLength={40} placeholder="Name of the e-wallet or bank" aria-label="Name of the payment" />}
+              <Field value={reference} onChange={(e) => setReference(e.target.value)} maxLength={60} placeholder={`${providerName || "Payment"} reference no.`} aria-label="Reference number" />
+              <Field value={account} onChange={(e) => setAccount(e.target.value)} maxLength={80} placeholder="Sender name or number (optional)" aria-label="Sender name or number" />
+              <PhotoPicker value={proof} onChange={setProof} required={proofRequired} label="Photo of the payment screen" />
+            </div>
           ) : (
-            needsRef && (
-              <Field
-                value={reference}
-                onChange={(e) => setReference(e.target.value)}
-                maxLength={60}
-                placeholder={method === "Card" ? "Approval code from the card terminal" : "Reference no. (GCash, Maya, bank…)"}
-                aria-label={method === "Card" ? "Card approval code" : "Online payment reference number"}
-              />
-            )
+            <div className="pay-details">
+              <Select value={card} onChange={(e) => setCard(e.target.value)} aria-label="Card type">
+                {(options?.card ?? ["Visa", "Mastercard"]).map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </Select>
+              <div className="pay-pair">
+                <Field value={reference} onChange={(e) => setReference(e.target.value)} maxLength={60} placeholder="Approval code" aria-label="Card approval code" />
+                <Field value={account} onChange={(e) => setAccount(e.target.value.replace(/\D/g, "").slice(0, 4))} inputMode="numeric" placeholder="Last 4 digits" aria-label="Last 4 digits of the card" className={last4Bad ? "field-bad" : ""} />
+              </div>
+              <PhotoPicker value={proof} onChange={setProof} required={false} label="Photo of the terminal slip" />
+            </div>
           )}
           <FormError message={formError} />
           <Button className="complete-button" onClick={complete} disabled={!ready || busy}>

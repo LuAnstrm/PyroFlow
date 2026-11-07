@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { ArrowDownRight, ArrowUpRight, Box, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Flame, Loader2, Package, Rocket, Sparkles, Star, Wind, X, Zap } from "lucide-react"
-import { fmtDateTime, initials, peso, type Role, type Sale, type Settings } from "./lib"
+import { fmtDateTime, initials, paymentLabel, peso, type Sale, type Settings } from "./lib"
 
 export function Logo({ dark = false }: { dark?: boolean }) {
   return (
@@ -66,7 +66,18 @@ export function FormGroup({ label, hint, wide, children }: { label: string; hint
 }
 
 export type Tone = "success" | "warning" | "danger" | "info" | "neutral"
-export const ROLE_TONE: Record<Role, Tone> = { Administrator: "danger", Owner: "warning", Manager: "success", Staff: "info" }
+/** Roles are named by the owner, so each one gets a steady colour from its name. */
+export function roleTone(role: string | null, isOwner = false): Tone {
+  if (isOwner) return "warning"
+  if (!role) return "neutral"
+  const tones: Tone[] = ["info", "success", "neutral"]
+  let h = 0
+  for (const ch of role) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  return tones[h % tones.length]
+}
+export function RoleBadge({ role, isOwner = false }: { role: string | null; isOwner?: boolean }) {
+  return <Badge tone={roleTone(role, isOwner)}>{role ?? "Not in the shop"}</Badge>
+}
 export function Badge({ children, tone = "neutral" }: { children: React.ReactNode; tone?: Tone }) {
   return <span className={`badge badge-${tone}`}>{children}</span>
 }
@@ -376,7 +387,7 @@ export function Receipt({ sale, settings }: { sale: Sale; settings: Settings }) 
         </div>
         <div>
           <span>Paid by</span>
-          <b>{sale.method}</b>
+          <b>{paymentLabel(sale)}</b>
         </div>
         {sale.method === "Cash" ? (
           <>
@@ -390,12 +401,20 @@ export function Receipt({ sale, settings }: { sale: Sale; settings: Settings }) 
             </div>
           </>
         ) : (
-          sale.reference && (
-            <div>
-              <span>{sale.method === "Card" ? "Approval code" : "Reference no."}</span>
-              <b>{sale.reference}</b>
-            </div>
-          )
+          <>
+            {sale.reference && (
+              <div>
+                <span>{sale.method === "Card" ? "Approval code" : "Reference no."}</span>
+                <b>{sale.reference}</b>
+              </div>
+            )}
+            {sale.payerAccount && (
+              <div>
+                <span>{sale.method === "Card" ? "Card no." : "Paid from"}</span>
+                <b>{sale.method === "Card" ? `**** ${sale.payerAccount}` : sale.payerAccount}</b>
+              </div>
+            )}
+          </>
         )}
       </div>
       <div className="receipt-thanks">

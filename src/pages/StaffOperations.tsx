@@ -15,7 +15,6 @@ import {
   toKey,
   useApp,
   useFetch,
-  type Role,
 } from "../lib"
 import {
   Avatar,
@@ -30,14 +29,16 @@ import {
   Loading,
   Metric,
   PageIntro,
-  ROLE_TONE,
+  RoleBadge,
 } from "../ui"
 
 type Activity = {
   id: number
   name: string
   username: string
-  role: Role
+  role: string | null
+  isOwner: boolean
+  canEndShift: boolean
   lastLoginAt: string | null
   online: number
   signedIn: number
@@ -157,9 +158,9 @@ export function StaffOperations() {
                           ) : (
                             <Badge tone="neutral">Signed out</Badge>
                           )}
-                          {r.role !== "Staff" && (
+                          {r.role && (
                             <small className="cell-sub">
-                              <Badge tone={ROLE_TONE[r.role]}>{r.role}</Badge>
+                              <RoleBadge role={r.role} isOwner={r.isOwner} />
                             </small>
                           )}
                         </td>
@@ -197,7 +198,7 @@ export function StaffOperations() {
                             >
                               <ReceiptText size={15} /> Sales
                             </Button>
-                            {r.role === "Staff" && r.signedIn > 0 && (
+                            {r.canEndShift && r.signedIn > 0 && (
                               <button
                                 type="button"
                                 title="End shift"

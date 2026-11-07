@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, ChevronRight, CircleDollarSign, Package, ReceiptText, ShoppingCart, Target, TrendingUp } from "lucide-react"
-import { fmtDayLong, fmtDateTime, num, peso, peso0, useApp, useFetch, type ForecastPoint, type HistoryPoint, type ProductForecast, type Sale } from "../lib"
+import { fmtDayLong, fmtDateTime, num, paymentLabel, peso, peso0, useApp, useFetch, type ForecastPoint, type HistoryPoint, type ProductForecast, type Sale } from "../lib"
 import { Badge, Button, Card, CardHead, ErrorBox, Loading, Metric, ProductTile } from "../ui"
 import { BarChart, ForecastChart } from "../charts"
 
@@ -230,7 +230,7 @@ export function Dashboard() {
                   </td>
                   <td>{fmtDateTime(s.soldAt)}</td>
                   <td>{s.cashier}</td>
-                  <td>{s.method}</td>
+                  <td>{paymentLabel(s)}</td>
                   <td className="num">
                     <b>{peso(s.total)}</b>
                   </td>

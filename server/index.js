@@ -6,7 +6,7 @@ import express from "express"
 import bcrypt from "bcryptjs"
 import { query, transaction } from "./db.js"
 import { buildForecast, toKey } from "./forecast.js"
-import { EDITABLE_ROLES, migrate, PERMISSION_KEYS, PERMISSIONS, ROLES, SECURITY_RULES } from "./permissions.js"
+import { CARD_NETWORKS, migrate, ONLINE_PROVIDERS, PERMISSION_KEYS, PERMISSIONS, SECURITY_RULES } from "./permissions.js"
 
 const app = express()
 app.disable("x-powered-by")
@@ -22,7 +22,10 @@ app.use((req, res, next) => {
   if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store")
   next()
 })
-app.use(express.json())
+// A sale can carry a photo of the payment, so it may be larger than other requests.
+const smallJson = express.json()
+const saleJson = express.json({ limit: "2mb" })
+app.use((req, res, next) => (req.method === "POST" && req.path === "/api/sales" ? saleJson : smallJson)(req, res, next))
 // Express 5 leaves req.body undefined when a request has no JSON body.
 app.use((req, _res, next) => {
   if (!req.body || typeof req.body !== "object") req.body = {}
@@ -95,14 +98,22 @@ function readCookie(req) {
 
 // --- Permissions ----------------------------------------------------------
 
-/** Saved permissions for each role, held in memory and refreshed whenever an admin saves them. */
+/** Each role's permissions, keyed by role id, held in memory and refreshed whenever the owner saves a role. */
 let rolePermissions = new Map()
 async function loadPermissions() {
-  const rows = await query("SELECT role, permission FROM role_permissions WHERE allowed = 1")
-  rolePermissions = new Map(EDITABLE_ROLES.map((role) => [role, new Set(rows.filter((r) => r.role === role).map((r) => r.permission))]))
+  const rows = await query("SELECT role_id, permission FROM role_grants")
+  const next = new Map()
+  for (const r of rows) {
+    if (!next.has(r.role_id)) next.set(r.role_id, new Set())
+    next.get(r.role_id).add(r.permission)
+  }
+  rolePermissions = next
 }
-const permissionsFor = (role) => (role === "Administrator" ? PERMISSION_KEYS : PERMISSION_KEYS.filter((key) => rolePermissions.get(role)?.has(key)))
-const can = (req, permission) => req.user.role === "Administrator" || Boolean(rolePermissions.get(req.user.role)?.has(permission))
+/** The owner has everything. Someone who hasn't joined the shop yet has nothing. */
+const permissionsFor = (u) => (u.is_owner ? PERMISSION_KEYS : u.role_id ? PERMISSION_KEYS.filter((key) => rolePermissions.get(u.role_id)?.has(key)) : [])
+const can = (req, permission) => Boolean(req.user.is_owner) || Boolean(req.user.role_id && rolePermissions.get(req.user.role_id)?.has(permission))
+/** Ids of the non-owner roles that have this permission. */
+const rolesWith = (permission) => [...rolePermissions].filter(([, keys]) => keys.has(permission)).map(([id]) => id)
 
 // Upgrades older databases on first use. It retries on later requests if MySQL
 // isn't ready yet, and the error handler below reports that as DB_DOWN.
@@ -118,7 +129,19 @@ app.use("/api", async (_req, _res, next) => {
   next()
 })
 
-const publicUser = (u) => ({ id: u.id, name: u.full_name, username: u.username, role: u.role, permissions: permissionsFor(u.role), lastLoginAt: u.last_login_at, createdAt: u.created_at })
+const publicUser = (u) => ({
+  id: u.id,
+  name: u.full_name,
+  username: u.username,
+  role: u.role_name ?? null,
+  roleId: u.role_id ?? null,
+  isOwner: Boolean(u.is_owner),
+  permissions: permissionsFor(u),
+  lastLoginAt: u.last_login_at,
+  createdAt: u.created_at,
+})
+/** Every user lookup joins the role, so its name and owner flag come along. */
+const USER_SELECT = "SELECT u.*, r.name AS role_name, r.is_owner FROM users u LEFT JOIN roles r ON r.id = u.role_id"
 
 // --- Auth ---------------------------------------------------------------
 
@@ -127,7 +150,7 @@ async function readSession(req) {
   if (!token) return null
   const tokenHash = hashToken(token)
   const [row] = await query(
-    `SELECT u.*, s.last_seen_at FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT u.*, r.name AS role_name, r.is_owner, s.last_seen_at FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN roles r ON r.id = u.role_id
      WHERE s.token_hash = ? AND s.expires_at > NOW() AND u.status = 'Active'`,
     [tokenHash],
   )
@@ -137,7 +160,8 @@ async function readSession(req) {
   }
   return { user: row, tokenHash }
 }
-async function auth(req, _res, next) {
+/** Signed in, whether or not the person has joined the shop yet. */
+async function signedIn(req, _res, next) {
   if (!readCookie(req)) throw new ApiError(401, "Please sign in.")
   const session = await readSession(req)
   if (!session) throw new ApiError(401, "Your session has ended. Please sign in again.")
@@ -145,11 +169,16 @@ async function auth(req, _res, next) {
   req.tokenHash = session.tokenHash
   next()
 }
-const allow = (...roles) => (req, _res, next) => {
-  if (!roles.includes(req.user.role)) throw new ApiError(403, "Your account doesn't have access to this.")
+/** Signed in and a member of the shop. Everything about the shop needs this. */
+async function auth(req, res, next) {
+  await signedIn(req, res, () => {})
+  if (!req.user.role_id) throw new ApiError(403, "Join the shop with an invite code first.")
   next()
 }
-const adminOnly = allow("Administrator")
+const ownerOnly = (req, _res, next) => {
+  if (!req.user.is_owner) throw new ApiError(403, "Only the shop owner can do this.")
+  next()
+}
 /** Lets the request through if the account has at least one of these permissions. */
 const need = (...permissions) => (req, _res, next) => {
   if (!permissions.some((p) => can(req, p))) throw new ApiError(403, "Your account doesn't have access to this.")
@@ -192,7 +221,7 @@ app.post("/api/auth/login", async (req, res) => {
   const password = String(req.body.password ?? "")
   const remember = Boolean(req.body.remember)
   const ua = describeAgent(req.headers["user-agent"])
-  const [user] = await query("SELECT * FROM users WHERE username = ?", [username])
+  const [user] = await query(`${USER_SELECT} WHERE u.username = ?`, [username])
   const log = (success, reason) => query("INSERT INTO login_logs (user_id, username, success, reason, ip, user_agent, login_at) VALUES (?,?,?,?,?,?,NOW())", [user?.id ?? null, username, success, reason, req.ip, ua])
 
   const security = await readSecurity()
@@ -212,19 +241,95 @@ app.post("/api/auth/login", async (req, res) => {
   failedLogins.delete(attemptKey)
   if (user.status !== "Active") {
     await log(0, "Account inactive")
-    throw new ApiError(403, "This account is inactive. Please ask your administrator to reactivate it.")
+    throw new ApiError(403, "This account is inactive. Please ask the shop owner to reactivate it.")
   }
   const { insertId } = await log(1, null)
-  const token = crypto.randomBytes(32).toString("hex")
-  const hours = remember ? 24 * 30 : security.sessionHours
-  await query("DELETE FROM sessions WHERE expires_at < NOW()")
-  await query("INSERT INTO sessions (token_hash, user_id, login_log_id, expires_at, last_seen_at) VALUES (?,?,?,DATE_ADD(NOW(), INTERVAL ? HOUR),NOW())", [hashToken(token), user.id, insertId, hours])
-  await query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [user.id])
-  res.setHeader("Set-Cookie", `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/${remember ? `; Max-Age=${hours * 3600}` : ""}${req.secure ? "; Secure" : ""}`)
+  await startSession(req, res, user.id, insertId, remember ? 24 * 30 : security.sessionHours, remember)
   res.json({ user: publicUser({ ...user, last_login_at: new Date() }) })
 })
 
-app.post("/api/auth/logout", auth, async (req, res) => {
+async function startSession(req, res, userId, loginLogId, hours, persistent) {
+  const token = crypto.randomBytes(32).toString("hex")
+  await query("DELETE FROM sessions WHERE expires_at < NOW()")
+  await query("INSERT INTO sessions (token_hash, user_id, login_log_id, expires_at, last_seen_at) VALUES (?,?,?,DATE_ADD(NOW(), INTERVAL ? HOUR),NOW())", [hashToken(token), userId, loginLogId, hours])
+  await query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [userId])
+  res.setHeader("Set-Cookie", `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/${persistent ? `; Max-Age=${hours * 3600}` : ""}${req.secure ? "; Secure" : ""}`)
+}
+
+// --- Registering and joining the shop ---------------------------------------
+// Like a classroom code: anyone can make an account, then the owner gives them an
+// invite code that puts them in the shop with the role the code was made for.
+
+const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789" // no 0/O or 1/I/L, which get mixed up
+const newCode = () => Array.from({ length: 7 }, () => CODE_CHARS[crypto.randomInt(CODE_CHARS.length)]).join("")
+/** People type codes in any case, with spaces or a dash. */
+const cleanCode = (v) => String(v ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12)
+
+/** Puts the account in the shop with the code's role. Runs inside a transaction. */
+async function redeemInvite(conn, userId, rawCode) {
+  const code = cleanCode(rawCode)
+  if (!code) throw new ApiError(400, "Enter the invite code from the shop owner.")
+  const [[invite]] = await conn.query("SELECT i.*, r.name AS role_name FROM invites i JOIN roles r ON r.id = i.role_id WHERE i.code = ? FOR UPDATE", [code])
+  const usable = invite && invite.active && (!invite.expires_at || new Date(invite.expires_at) > new Date()) && (invite.max_uses === null || invite.uses < invite.max_uses)
+  if (!usable) throw Object.assign(new ApiError(400, "That invite code isn't valid. It may have expired or been used up, so ask the owner for a new one."), { badCode: true })
+  await conn.query("UPDATE invites SET uses = uses + 1 WHERE id = ?", [invite.id])
+  await conn.query("UPDATE users SET role_id = ?, joined_at = NOW() WHERE id = ?", [invite.role_id, userId])
+  return invite.role_name
+}
+
+// Wrong codes count like wrong passwords, so codes can't be found by trying many.
+async function guardCodeAttempts(req, work) {
+  const security = await readSecurity()
+  const key = `code|${req.ip}`
+  const lockMs = security.lockMinutes * 60000
+  if (loginLockRemaining(key, lockMs, security.maxFailedLogins) > 0) throw new ApiError(429, "Too many wrong invite codes. Please wait a few minutes and try again.")
+  try {
+    const result = await work()
+    failedLogins.delete(key)
+    return result
+  } catch (err) {
+    if (err.badCode) recordFailedLogin(key, lockMs)
+    throw err
+  }
+}
+
+app.post("/api/auth/register", async (req, res) => {
+  const name = text(req.body.name, "Full name", 120)
+  const username = text(req.body.username, "Username", 60)
+  if (!name || !username) throw new ApiError(400, "Enter your full name and a username.")
+  if (!/^[A-Za-z0-9._-]{3,60}$/.test(username)) throw new ApiError(400, "Usernames use 3 to 60 letters, numbers, dots, dashes or underscores.")
+  const hash = await bcrypt.hash(await newPassword(req.body.password), 10)
+  const code = cleanCode(req.body.code)
+  const create = () =>
+    transaction(async (conn) => {
+      // In a shop with no owner yet, the first person to register becomes the owner.
+      const [[ownerRole]] = await conn.query("SELECT id FROM roles WHERE is_owner = 1 LIMIT 1 FOR UPDATE")
+      const [[owner]] = ownerRole ? await conn.query("SELECT id FROM users WHERE role_id = ? LIMIT 1", [ownerRole.id]) : [[null]]
+      const makeOwner = Boolean(ownerRole && !owner)
+      const [r] = await conn
+        .query("INSERT INTO users (full_name, username, password_hash, role_id, joined_at) VALUES (?,?,?,?,?)", [name, username, hash, makeOwner ? ownerRole.id : null, makeOwner ? new Date() : null])
+        .catch((err) => {
+          if (err.code === "ER_DUP_ENTRY") throw new ApiError(409, "That username is already taken. Try another one.")
+          throw err
+        })
+      if (!makeOwner && code) await redeemInvite(conn, r.insertId, code)
+      return r.insertId
+    })
+  const id = code ? await guardCodeAttempts(req, create) : await create()
+  const { insertId } = await query("INSERT INTO login_logs (user_id, username, success, reason, ip, user_agent, login_at) VALUES (?,?,1,'New account',?,?,NOW())", [id, username, req.ip, describeAgent(req.headers["user-agent"])])
+  await startSession(req, res, id, insertId, (await readSecurity()).sessionHours, false)
+  const [user] = await query(`${USER_SELECT} WHERE u.id = ?`, [id])
+  res.status(201).json({ user: publicUser(user) })
+})
+
+app.post("/api/join", signedIn, async (req, res) => {
+  if (req.user.role_id) throw new ApiError(409, "You're already part of the shop.")
+  await guardCodeAttempts(req, () => transaction((conn) => redeemInvite(conn, req.user.id, req.body.code)))
+  const [user] = await query(`${USER_SELECT} WHERE u.id = ?`, [req.user.id])
+  res.json({ user: publicUser(user) })
+})
+
+app.post("/api/auth/logout", signedIn, async (req, res) => {
   await query("UPDATE login_logs l JOIN sessions s ON s.login_log_id = l.id SET l.logout_at = NOW() WHERE s.token_hash = ?", [req.tokenHash])
   await query("DELETE FROM sessions WHERE token_hash = ?", [req.tokenHash])
   res.setHeader("Set-Cookie", `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`)
@@ -239,14 +344,14 @@ app.get("/api/auth/me", async (req, res) => {
 
 // --- My account ----------------------------------------------------------
 
-app.put("/api/account", auth, async (req, res) => {
+app.put("/api/account", signedIn, async (req, res) => {
   const name = text(req.body.name, "Full name", 120)
   if (!name) throw new ApiError(400, "Please enter your full name.")
   await query("UPDATE users SET full_name = ? WHERE id = ?", [name, req.user.id])
   res.json({ user: publicUser({ ...req.user, full_name: name }) })
 })
 
-app.post("/api/account/password", auth, async (req, res) => {
+app.post("/api/account/password", signedIn, async (req, res) => {
   if (!(await bcrypt.compare(String(req.body.current ?? ""), req.user.password_hash))) throw new ApiError(400, "Your current password is incorrect.")
   const password = await newPassword(req.body.next)
   await query("UPDATE users SET password_hash = ? WHERE id = ?", [await bcrypt.hash(password, 10), req.user.id])
@@ -255,7 +360,7 @@ app.post("/api/account/password", auth, async (req, res) => {
   res.json({ ok: true })
 })
 
-app.get("/api/account/logins", auth, async (req, res) => {
+app.get("/api/account/logins", signedIn, async (req, res) => {
   res.json(await query("SELECT id, success, reason, user_agent AS device, login_at AS loginAt, logout_at AS logoutAt FROM login_logs WHERE user_id = ? ORDER BY login_at DESC LIMIT 8", [req.user.id]))
 })
 
@@ -291,9 +396,9 @@ async function readSecurity() {
 
 app.get("/api/settings", auth, async (_req, res) => res.json(await readPublicSettings()))
 
-const SETTING_KEYS = ["business_name", "business_address", "contact_number", "email", "tin", "branch_name", "tax_rate", "receipt_header", "receipt_footer", "receipt_show_cashier", "receipt_show_tin", "receipt_auto_print", "low_stock_alerts", "alert_after_sale"]
+const SETTING_KEYS = ["business_name", "business_address", "contact_number", "email", "tin", "branch_name", "tax_rate", "receipt_header", "receipt_footer", "receipt_show_cashier", "receipt_show_tin", "receipt_auto_print", "low_stock_alerts", "alert_after_sale", "require_payment_proof"]
 
-app.put("/api/settings", auth, adminOnly, async (req, res) => {
+app.put("/api/settings", auth, ownerOnly, async (req, res) => {
   const entries = Object.entries(req.body).filter(([k]) => SETTING_KEYS.includes(k))
   if ("tax_rate" in req.body) {
     const rate = Number(req.body.tax_rate)
@@ -447,8 +552,9 @@ app.get("/api/movements", auth, need("inventory.view"), async (req, res) => {
 
 const SALE_COLUMNS = `s.id, s.txn_no AS txnNo, s.sold_at AS soldAt, s.subtotal, s.discount_pct AS discountPct,
   s.discount_amount AS discountAmount, s.tax_rate AS taxRate, s.tax_amount AS taxAmount, s.total,
-  s.payment_method AS method, s.amount_tendered AS tendered, s.change_due AS changeDue,
-  s.payment_reference AS reference, s.status, s.refunded_at AS refundedAt, s.refund_reason AS refundReason,
+  s.payment_method AS method, s.payment_provider AS provider, s.amount_tendered AS tendered, s.change_due AS changeDue,
+  s.payment_reference AS reference, s.payment_account AS payerAccount,
+  EXISTS(SELECT 1 FROM payment_proofs pp WHERE pp.sale_id = s.id) AS hasProof, s.status, s.refunded_at AS refundedAt, s.refund_reason AS refundReason,
   u.full_name AS cashier`
 
 async function readSale(id) {
@@ -458,15 +564,55 @@ async function readSale(id) {
   return sale
 }
 
+// The POS shrinks photos well below this before sending. It stays small because XAMPP's
+// MySQL only accepts 1 MB per statement out of the box (max_allowed_packet).
+const MAX_PROOF_BYTES = 700 * 1024
+
+/** Reads a photo sent as a data: URL. Only real JPEG, PNG or WebP images are kept. */
+function readProof(value) {
+  if (value === undefined || value === null || value === "") return null
+  const match = typeof value === "string" && value.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/)
+  if (!match) throw new ApiError(400, "The payment photo must be a JPEG, PNG or WebP image.")
+  const data = Buffer.from(match[2], "base64")
+  if (data.length > MAX_PROOF_BYTES) throw new ApiError(400, "The payment photo is too large. Take it again a little further away, or crop the screenshot.")
+  const magic = { "image/jpeg": [0xff, 0xd8, 0xff], "image/png": [0x89, 0x50, 0x4e, 0x47], "image/webp": [0x52, 0x49, 0x46, 0x46] }[match[1]]
+  if (!magic.every((b, i) => data[i] === b)) throw new ApiError(400, "That file isn't a readable image.")
+  return { mime: match[1], data }
+}
+
+/**
+ * What the customer paid with, in detail: the e-wallet, bank or card network by name,
+ * the reference or approval code, who paid, and a photo of the payment screen or slip.
+ */
+async function readPaymentDetails(method, body) {
+  if (method === "Cash") return { provider: null, reference: null, account: null, proof: null }
+  const provider = text(body.provider, "Payment provider", 40)
+  const reference = text(body.reference, "Reference number", 60)
+  const account = text(body.account, method === "Card" ? "Card digits" : "Payer name or number", 80)
+  const proof = readProof(body.proof)
+  if (method === "Online Payment") {
+    if (!provider) throw new ApiError(400, "Choose how the customer paid online: GCash, Maya, a bank, and so on.")
+    if (!reference) throw new ApiError(400, `Enter the ${provider} reference number.`)
+    const settings = await readSettings()
+    if (settings.require_payment_proof === "1" && !proof) throw new ApiError(400, "Add a photo or screenshot of the payment first.")
+  } else {
+    if (!CARD_NETWORKS.includes(provider)) throw new ApiError(400, "Choose the card type: Visa, Mastercard, and so on.")
+    if (!reference) throw new ApiError(400, "Enter the approval code from the card terminal.")
+    if (account && !/^\d{4}$/.test(account)) throw new ApiError(400, "Enter only the last 4 digits of the card.")
+  }
+  return { provider, reference, account: account || null, proof }
+}
+
+app.get("/api/payment-options", auth, (_req, res) => res.json({ online: ONLINE_PROVIDERS, card: CARD_NETWORKS }))
+
 app.post("/api/sales", auth, need("sales.process"), async (req, res) => {
   const lines = Array.isArray(req.body.items) ? req.body.items : []
   const discountPct = Number(req.body.discountPct ?? 0)
   const method = req.body.method
-  const reference = method === "Cash" ? "" : text(req.body.reference, "Reference number", 60)
   if (!lines.length) throw new ApiError(400, "The cart is empty.")
   if (![0, 5, 10].includes(discountPct)) throw new ApiError(400, "Invalid discount.")
   if (!["Cash", "Online Payment", "Card"].includes(method)) throw new ApiError(400, "Choose a payment method.")
-  if (method !== "Cash" && !reference) throw new ApiError(400, method === "Card" ? "Enter the card approval code." : "Enter the online payment reference number.")
+  const payment = await readPaymentDetails(method, req.body)
 
   // Lines for the same product are added together. Checked one by one, each
   // could pass the stock check on its own and together sell more than exists.
@@ -497,11 +643,13 @@ app.post("/api/sales", auth, need("sales.process"), async (req, res) => {
     if (method === "Cash" && !(tendered >= total)) throw new ApiError(400, "Cash received is less than the total.")
     if (method === "Cash" && tendered > MAX_TENDERED) throw new ApiError(400, "Check the cash received. That amount is too large.")
     const [r] = await conn.query(
-      "INSERT INTO sales (user_id, sold_at, subtotal, discount_pct, discount_amount, tax_rate, tax_amount, total, payment_method, amount_tendered, change_due, payment_reference) VALUES (?,NOW(),?,?,?,?,?,?,?,?,?,?)",
-      [req.user.id, money(subtotal), discountPct, discountAmount, taxRate, taxAmount, total, method, tendered, method === "Cash" ? money(tendered - total) : null, reference || null],
+      "INSERT INTO sales (user_id, sold_at, subtotal, discount_pct, discount_amount, tax_rate, tax_amount, total, payment_method, payment_provider, amount_tendered, change_due, payment_reference, payment_account) VALUES (?,NOW(),?,?,?,?,?,?,?,?,?,?,?,?)",
+      [req.user.id, money(subtotal), discountPct, discountAmount, taxRate, taxAmount, total, method, payment.provider, tendered, method === "Cash" ? money(tendered - total) : null, payment.reference, payment.account],
     )
     const txnNo = `TXN-${new Date().getFullYear()}-${String(r.insertId).padStart(6, "0")}`
     await conn.query("UPDATE sales SET txn_no = ? WHERE id = ?", [txnNo, r.insertId])
+    // A prepared statement sends the photo as raw bytes; query() would double its size as hex.
+    if (payment.proof) await conn.execute("INSERT INTO payment_proofs (sale_id, mime, data, uploaded_at) VALUES (?,?,?,NOW())", [r.insertId, payment.proof.mime, payment.proof.data])
     for (const [id, qty] of quantities) {
       const p = byId.get(id)
       const after = p.stock - qty
@@ -529,10 +677,11 @@ app.get("/api/sales", auth, async (req, res) => {
   // Without the permission, people only see their own sales.
   if (!can(req, "transactions.all")) add("s.user_id = ?", req.user.id)
   else if (isId(q.cashier)) add("s.user_id = ?", q.cashier)
-  if (single(q.search)) add("s.txn_no LIKE ?", `%${q.search}%`)
+  if (single(q.search)) add("(s.txn_no LIKE ? OR s.payment_reference LIKE ?)", `%${q.search}%`, `%${q.search}%`)
   if (isDateKey(q.from)) add("s.sold_at >= ?", `${q.from} 00:00:00`)
   if (isDateKey(q.to)) add("s.sold_at <= ?", `${q.to} 23:59:59`)
   if (single(q.method)) add("s.payment_method = ?", q.method)
+  if (single(q.provider)) add("s.payment_provider = ?", q.provider)
   if (single(q.status)) add("s.status = ?", q.status)
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : ""
   const [{ total }] = await query(`SELECT COUNT(*) AS total FROM sales s ${clause}`, params)
@@ -553,6 +702,16 @@ app.get("/api/sales/:id", auth, async (req, res) => {
   const [owner] = await query("SELECT user_id FROM sales WHERE id = ?", [req.params.id])
   if (!can(req, "transactions.all") && owner.user_id !== req.user.id) throw new ApiError(403, "You can only open your own transactions.")
   res.json(sale)
+})
+
+// The photo of the payment, for anyone allowed to open the sale itself.
+app.get("/api/sales/:id/proof", auth, async (req, res) => {
+  const [row] = await query("SELECT s.user_id, p.mime, p.data FROM sales s JOIN payment_proofs p ON p.sale_id = s.id WHERE s.id = ?", [req.params.id])
+  if (!row) throw new ApiError(404, "This sale has no payment photo.")
+  if (!can(req, "transactions.all") && row.user_id !== req.user.id) throw new ApiError(403, "You can only open your own transactions.")
+  res.setHeader("Content-Type", row.mime)
+  res.setHeader("Content-Disposition", `inline; filename="payment-${req.params.id}.${row.mime.split("/")[1]}"`)
+  res.end(row.data)
 })
 
 app.post("/api/sales/:id/refund", auth, need("transactions.refund"), async (req, res) => {
@@ -734,7 +893,7 @@ app.get("/api/reports", auth, need("reports.view"), async (req, res) => {
     [bucket, ...range(from, to)],
   )
   const byMethod = await query(
-    `SELECT payment_method AS name, COUNT(*) AS orders, SUM(total) AS value FROM sales
+    `SELECT IF(payment_provider IS NULL, payment_method, CONCAT(payment_method, ' · ', payment_provider)) AS name, COUNT(*) AS orders, SUM(total) AS value FROM sales
      WHERE status='Completed' AND sold_at BETWEEN ? AND ? GROUP BY name ORDER BY value DESC`,
     range(from, to),
   )
@@ -782,7 +941,7 @@ app.get("/api/reports", auth, need("reports.view"), async (req, res) => {
 app.get("/api/staff/activity", auth, need("staff.operations"), async (req, res) => {
   const date = isDateKey(req.query.date) ? req.query.date : toKey(new Date())
   const rows = await query(
-    `SELECT u.id, u.full_name AS name, u.username, u.role, u.last_login_at AS lastLoginAt,
+    `SELECT u.id, u.full_name AS name, u.username, r.name AS role, r.is_owner AS isOwner, u.role_id AS roleId, u.last_login_at AS lastLoginAt,
        EXISTS(SELECT 1 FROM sessions x WHERE x.user_id = u.id AND x.expires_at > NOW() AND x.last_seen_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS online,
        EXISTS(SELECT 1 FROM sessions x WHERE x.user_id = u.id AND x.expires_at > NOW()) AS signedIn,
        COALESCE(SUM(s.status = 'Completed'), 0) AS orders,
@@ -790,49 +949,156 @@ app.get("/api/staff/activity", auth, need("staff.operations"), async (req, res) 
        COALESCE(SUM(s.status = 'Refunded'), 0) AS refunds,
        COALESCE(SUM(IF(s.status = 'Refunded', s.total, 0)), 0) AS refundAmount,
        MAX(s.sold_at) AS lastSaleAt
-     FROM users u LEFT JOIN sales s ON s.user_id = u.id AND s.sold_at BETWEEN ? AND ?
-     WHERE (u.role = 'Staff' AND u.status = 'Active') OR s.id IS NOT NULL
-     GROUP BY u.id, u.full_name, u.username, u.role, u.last_login_at
+     FROM users u LEFT JOIN roles r ON r.id = u.role_id LEFT JOIN sales s ON s.user_id = u.id AND s.sold_at BETWEEN ? AND ?
+     WHERE (u.role_id IN (?) AND u.status = 'Active') OR s.id IS NOT NULL
+     GROUP BY u.id, u.full_name, u.username, r.name, r.is_owner, u.role_id, u.last_login_at
      ORDER BY revenue DESC, u.full_name`,
-    [`${date} 00:00:00`, `${date} 23:59:59`],
+    // Everyone in a role that can ring up sales, plus anyone who sold something that day.
+    [`${date} 00:00:00`, `${date} 23:59:59`, [0, ...rolesWith("sales.process")]],
   )
-  res.json({ date, rows: rows.map((r) => ({ ...r, orders: Number(r.orders), revenue: Number(r.revenue), refunds: Number(r.refunds), refundAmount: Number(r.refundAmount) })) })
+  res.json({
+    date,
+    rows: rows.map(({ roleId, ...r }) => ({
+      ...r,
+      isOwner: Boolean(r.isOwner),
+      canEndShift: Boolean(roleId) && !r.isOwner && r.id !== req.user.id && !rolePermissions.get(roleId)?.has("staff.operations"),
+      orders: Number(r.orders),
+      revenue: Number(r.revenue),
+      refunds: Number(r.refunds),
+      refundAmount: Number(r.refundAmount),
+    })),
+  })
 })
 
-// Ends a cashier's shift by signing them out everywhere. Only ever reaches Staff accounts.
+// Ends a team member's shift by signing them out everywhere. Never reaches the owner,
+// or anyone else who can manage staff operations.
 app.post("/api/staff/:id/end-shift", auth, need("staff.operations"), async (req, res) => {
-  const [target] = await query("SELECT id, role FROM users WHERE id = ?", [req.params.id])
-  if (!target) throw new ApiError(404, "Account not found.")
-  if (target.role !== "Staff") throw new ApiError(403, "You can only end the shift of a Staff account.")
+  const [target] = await query(`${USER_SELECT} WHERE u.id = ?`, [req.params.id])
+  if (!target || !target.role_id) throw new ApiError(404, "Account not found.")
+  if (target.id === req.user.id) throw new ApiError(400, "Use Log out to end your own shift.")
+  if (target.is_owner || rolePermissions.get(target.role_id)?.has("staff.operations")) throw new ApiError(403, "You can only end the shift of someone who doesn't manage staff.")
   await endSessions(target.id)
   res.json({ ok: true })
 })
 
-// --- Permissions & security (administrator) ------------------------------------
+// --- Roles (owner) ------------------------------------------------------------
 
-async function readPermissionMatrix() {
-  const rows = await query("SELECT role, permission FROM role_permissions WHERE allowed = 1")
-  return Object.fromEntries(EDITABLE_ROLES.map((role) => [role, rows.filter((r) => r.role === role && PERMISSION_KEYS.includes(r.permission)).map((r) => r.permission)]))
+async function readRoles() {
+  const roles = await query(
+    `SELECT r.id, r.name, r.description, r.is_owner AS isOwner, r.created_at AS createdAt,
+       (SELECT COUNT(*) FROM users u WHERE u.role_id = r.id) AS members
+     FROM roles r ORDER BY r.is_owner DESC, r.name`,
+  )
+  return roles.map((r) => ({ ...r, isOwner: Boolean(r.isOwner), members: Number(r.members), permissions: r.isOwner ? PERMISSION_KEYS : PERMISSION_KEYS.filter((k) => rolePermissions.get(r.id)?.has(k)) }))
 }
 
-app.get("/api/permissions", auth, adminOnly, async (_req, res) => {
-  res.json({ roles: EDITABLE_ROLES, catalog: PERMISSIONS, matrix: await readPermissionMatrix() })
+app.get("/api/roles", auth, ownerOnly, async (_req, res) => {
+  res.json({ roles: await readRoles(), catalog: PERMISSIONS })
 })
 
-app.put("/api/permissions", auth, adminOnly, async (req, res) => {
-  const matrix = req.body.matrix
-  for (const role of EDITABLE_ROLES) {
-    if (!Array.isArray(matrix?.[role]) || matrix[role].some((key) => !PERMISSION_KEYS.includes(key))) throw new ApiError(400, "Those permissions aren't valid.")
-  }
-  const rows = EDITABLE_ROLES.flatMap((role) => PERMISSION_KEYS.map((key) => [role, key, matrix[role].includes(key) ? 1 : 0]))
-  await query("INSERT INTO role_permissions (role, permission, allowed) VALUES ? ON DUPLICATE KEY UPDATE allowed = VALUES(allowed)", [rows])
+function readRoleBody(body) {
+  const name = text(body.name, "Role name", 40)
+  const description = text(body.description, "Description", 200)
+  if (!name) throw new ApiError(400, "Give the role a name, like Cashier.")
+  if (!Array.isArray(body.permissions) || body.permissions.some((k) => !PERMISSION_KEYS.includes(k))) throw new ApiError(400, "Those permissions aren't valid.")
+  return { name, description: description || null, permissions: [...new Set(body.permissions)] }
+}
+const duplicateRole = (err) => {
+  if (err.code === "ER_DUP_ENTRY") throw new ApiError(409, "There's already a role with that name.")
+  throw err
+}
+async function saveGrants(conn, roleId, permissions) {
+  await conn.query("DELETE FROM role_grants WHERE role_id = ?", [roleId])
+  if (permissions.length) await conn.query("INSERT INTO role_grants (role_id, permission) VALUES ?", [permissions.map((k) => [roleId, k])])
+}
+
+app.post("/api/roles", auth, ownerOnly, async (req, res) => {
+  const role = readRoleBody(req.body)
+  const id = await transaction(async (conn) => {
+    const [r] = await conn.query("INSERT INTO roles (name, description) VALUES (?,?)", [role.name, role.description]).catch(duplicateRole)
+    await saveGrants(conn, r.insertId, role.permissions)
+    return r.insertId
+  })
   await loadPermissions()
-  res.json({ matrix: await readPermissionMatrix() })
+  res.status(201).json({ id })
 })
 
-app.get("/api/security", auth, adminOnly, async (_req, res) => res.json(await readSecurity()))
+app.put("/api/roles/:id", auth, ownerOnly, async (req, res) => {
+  const role = readRoleBody(req.body)
+  await transaction(async (conn) => {
+    const [[existing]] = await conn.query("SELECT is_owner FROM roles WHERE id = ? FOR UPDATE", [req.params.id])
+    if (!existing) throw new ApiError(404, "Role not found.")
+    if (existing.is_owner) throw new ApiError(400, "The Owner role always has full access and can't be changed.")
+    await conn.query("UPDATE roles SET name = ?, description = ? WHERE id = ?", [role.name, role.description, req.params.id]).catch(duplicateRole)
+    await saveGrants(conn, req.params.id, role.permissions)
+  })
+  await loadPermissions()
+  res.json({ ok: true })
+})
 
-app.put("/api/security", auth, adminOnly, async (req, res) => {
+app.delete("/api/roles/:id", auth, ownerOnly, async (req, res) => {
+  await transaction(async (conn) => {
+    const [[role]] = await conn.query("SELECT is_owner, (SELECT COUNT(*) FROM users WHERE role_id = roles.id) AS members FROM roles WHERE id = ? FOR UPDATE", [req.params.id])
+    if (!role) throw new ApiError(404, "Role not found.")
+    if (role.is_owner) throw new ApiError(400, "The Owner role can't be deleted.")
+    if (role.members > 0) throw new ApiError(409, "Move everyone in this role to another role first.")
+    await conn.query("DELETE FROM roles WHERE id = ?", [req.params.id])
+  })
+  await loadPermissions()
+  res.json({ ok: true })
+})
+
+// --- Invite codes (owner) --------------------------------------------------------
+
+app.get("/api/invites", auth, ownerOnly, async (_req, res) => {
+  const rows = await query(
+    `SELECT i.id, i.code, i.role_id AS roleId, r.name AS role, i.created_at AS createdAt, i.expires_at AS expiresAt,
+       i.max_uses AS maxUses, i.uses, i.active, u.full_name AS createdBy
+     FROM invites i JOIN roles r ON r.id = i.role_id JOIN users u ON u.id = i.created_by
+     ORDER BY i.active DESC, i.created_at DESC LIMIT 200`,
+  )
+  const now = Date.now()
+  res.json(
+    rows.map((i) => ({
+      ...i,
+      active: Boolean(i.active),
+      state: !i.active ? "Turned off" : i.expiresAt && new Date(i.expiresAt).getTime() <= now ? "Expired" : i.maxUses !== null && i.uses >= i.maxUses ? "Used up" : "Active",
+    })),
+  )
+})
+
+app.post("/api/invites", auth, ownerOnly, async (req, res) => {
+  const roleId = Number(req.body.roleId)
+  const days = req.body.days === null || req.body.days === undefined || req.body.days === "" ? null : Number(req.body.days)
+  const maxUses = req.body.maxUses === null || req.body.maxUses === undefined || req.body.maxUses === "" ? null : Number(req.body.maxUses)
+  const [role] = await query("SELECT id, is_owner FROM roles WHERE id = ?", [Number.isInteger(roleId) ? roleId : 0])
+  if (!role) throw new ApiError(400, "Choose the role this code gives.")
+  if (days !== null && ![1, 7, 30].includes(days)) throw new ApiError(400, "Choose how long the code works.")
+  if (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > 500)) throw new ApiError(400, "Number of people must be a whole number from 1 to 500.")
+  // A code that makes someone an owner is limited to one person and one day.
+  const ownerCode = Boolean(role.is_owner)
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = newCode()
+    try {
+      const r = await query("INSERT INTO invites (code, role_id, created_by, expires_at, max_uses) VALUES (?,?,?,IF(? IS NULL, NULL, DATE_ADD(NOW(), INTERVAL ? DAY)),?)", [code, role.id, req.user.id, ownerCode ? 1 : days, ownerCode ? 1 : days, ownerCode ? 1 : maxUses])
+      return res.status(201).json({ id: r.insertId, code })
+    } catch (err) {
+      if (err.code !== "ER_DUP_ENTRY") throw err
+    }
+  }
+  throw new ApiError(500, "Couldn't make a new code. Please try again.")
+})
+
+app.post("/api/invites/:id/disable", auth, ownerOnly, async (req, res) => {
+  mustExist(await query("UPDATE invites SET active = 0 WHERE id = ?", [req.params.id]), "Invite code not found.")
+  res.json({ ok: true })
+})
+
+// --- Security (owner) ---------------------------------------------------------------
+
+app.get("/api/security", auth, ownerOnly, async (_req, res) => res.json(await readSecurity()))
+
+app.put("/api/security", auth, ownerOnly, async (req, res) => {
   const fields = { security_max_failed_logins: "maxFailedLogins", security_lock_minutes: "lockMinutes", security_session_hours: "sessionHours", security_password_min: "passwordMin" }
   const values = Object.entries(fields).map(([key, field]) => {
     const rule = SECURITY_RULES[key]
@@ -844,77 +1110,74 @@ app.put("/api/security", auth, adminOnly, async (req, res) => {
   res.json(await readSecurity())
 })
 
-// Signs out everyone but the administrator pressing the button.
-app.post("/api/security/end-sessions", auth, adminOnly, async (req, res) => {
+// Signs out everyone but the owner pressing the button.
+app.post("/api/security/end-sessions", auth, ownerOnly, async (req, res) => {
   await query("UPDATE login_logs l JOIN sessions s ON s.login_log_id = l.id SET l.logout_at = NOW() WHERE s.token_hash <> ?", [req.tokenHash])
   const result = await query("DELETE FROM sessions WHERE token_hash <> ?", [req.tokenHash])
   res.json({ ended: result.affectedRows })
 })
 
-// --- Accounts & login history (administrator) --------------------------------
+// --- Team members & login history (owner) ------------------------------------------
 
-app.get("/api/users", auth, adminOnly, async (_req, res) => {
-  res.json(
-    await query(
-      `SELECT u.id, u.full_name AS name, u.username, u.role, u.status, u.created_at AS createdAt, u.last_login_at AS lastLoginAt,
-         EXISTS(SELECT 1 FROM sessions s WHERE s.user_id = u.id AND s.expires_at > NOW() AND s.last_seen_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS online,
-         (SELECT COUNT(*) FROM login_logs l WHERE l.user_id = u.id AND l.success = 1) AS loginCount
-       FROM users u ORDER BY u.status, FIELD(u.role, 'Administrator', 'Owner', 'Manager', 'Staff'), u.full_name`,
-    ),
+app.get("/api/users", auth, ownerOnly, async (_req, res) => {
+  const rows = await query(
+    `SELECT u.id, u.full_name AS name, u.username, u.role_id AS roleId, r.name AS role, r.is_owner AS isOwner, u.status,
+       u.created_at AS createdAt, u.joined_at AS joinedAt, u.last_login_at AS lastLoginAt,
+       EXISTS(SELECT 1 FROM sessions s WHERE s.user_id = u.id AND s.expires_at > NOW() AND s.last_seen_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS online,
+       (SELECT COUNT(*) FROM login_logs l WHERE l.user_id = u.id AND l.success = 1) AS loginCount
+     FROM users u JOIN roles r ON r.id = u.role_id
+     ORDER BY u.status, r.is_owner DESC, r.name, u.full_name`,
   )
+  res.json(rows.map((u) => ({ ...u, isOwner: Boolean(u.isOwner) })))
 })
 
-function readUserBody(body) {
-  const name = text(body.name, "Full name", 120)
-  const username = text(body.username, "Username", 60)
-  const role = body.role
-  if (!name || !username) throw new ApiError(400, "Full name and username are required.")
-  if (!ROLES.includes(role)) throw new ApiError(400, "Choose a role.")
-  return { name, username, role }
-}
-const duplicateUsername = (err) => {
-  if (err.code === "ER_DUP_ENTRY") throw new ApiError(409, "That username is already taken.")
-  throw err
-}
 /** Signs a user out everywhere, except optionally the session passed in. */
 async function endSessions(userId, keepTokenHash = "") {
   await query("UPDATE login_logs l JOIN sessions s ON s.login_log_id = l.id SET l.logout_at = NOW() WHERE s.user_id = ? AND s.token_hash <> ?", [userId, keepTokenHash])
   await query("DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?", [userId, keepTokenHash])
 }
+/** Finds a member of the shop who isn't the person asking. */
+async function otherMember(req) {
+  if (Number(req.params.id) === req.user.id) throw new ApiError(400, "You can't change your own role or remove yourself. Another owner can.")
+  const [target] = await query(`${USER_SELECT} WHERE u.id = ? AND u.role_id IS NOT NULL`, [req.params.id])
+  if (!target) throw new ApiError(404, "Team member not found.")
+  return target
+}
 
-app.post("/api/users", auth, adminOnly, async (req, res) => {
-  const { name, username, role } = readUserBody(req.body)
-  const hash = await bcrypt.hash(await newPassword(req.body.password), 10)
-  const r = await query("INSERT INTO users (full_name, username, password_hash, role) VALUES (?,?,?,?)", [name, username, hash, role]).catch(duplicateUsername)
-  res.status(201).json({ id: r.insertId })
-})
-
-app.put("/api/users/:id", auth, adminOnly, async (req, res) => {
-  const { name, username, role } = readUserBody(req.body)
-  if (Number(req.params.id) === req.user.id && role !== req.user.role) throw new ApiError(400, "You can't change your own role.")
-  const result = await query("UPDATE users SET full_name=?, username=?, role=? WHERE id=?", [name, username, role, req.params.id]).catch(duplicateUsername)
-  mustExist(result, "Account not found.")
+app.put("/api/users/:id/role", auth, ownerOnly, async (req, res) => {
+  const target = await otherMember(req)
+  const [role] = await query("SELECT id FROM roles WHERE id = ?", [Number(req.body.roleId) || 0])
+  if (!role) throw new ApiError(400, "Choose a role.")
+  await query("UPDATE users SET role_id = ? WHERE id = ?", [role.id, target.id])
   res.json({ ok: true })
 })
 
-app.post("/api/users/:id/password", auth, adminOnly, async (req, res) => {
+// Takes the person out of the shop. Their account and past sales stay, and they can
+// join again later with a new invite code.
+app.post("/api/users/:id/remove", auth, ownerOnly, async (req, res) => {
+  const target = await otherMember(req)
+  await query("UPDATE users SET role_id = NULL, joined_at = NULL WHERE id = ?", [target.id])
+  await endSessions(target.id)
+  res.json({ ok: true })
+})
+
+app.post("/api/users/:id/password", auth, ownerOnly, async (req, res) => {
   const hash = await bcrypt.hash(await newPassword(req.body.password), 10)
-  const result = await query("UPDATE users SET password_hash = ? WHERE id = ?", [hash, req.params.id])
-  mustExist(result, "Account not found.")
+  const result = await query("UPDATE users SET password_hash = ? WHERE id = ? AND role_id IS NOT NULL", [hash, req.params.id])
+  mustExist(result, "Team member not found.")
   await endSessions(req.params.id, Number(req.params.id) === req.user.id ? req.tokenHash : "")
   res.json({ ok: true })
 })
 
-app.post("/api/users/:id/status", auth, adminOnly, async (req, res) => {
+app.post("/api/users/:id/status", auth, ownerOnly, async (req, res) => {
   const status = req.body.status === "Active" ? "Active" : "Inactive"
-  if (Number(req.params.id) === req.user.id) throw new ApiError(400, "You can't deactivate your own account.")
-  const result = await query("UPDATE users SET status = ? WHERE id = ?", [status, req.params.id])
-  mustExist(result, "Account not found.")
-  if (status === "Inactive") await endSessions(req.params.id)
+  const target = await otherMember(req)
+  await query("UPDATE users SET status = ? WHERE id = ?", [status, target.id])
+  if (status === "Inactive") await endSessions(target.id)
   res.json({ ok: true })
 })
 
-app.get("/api/login-logs", auth, adminOnly, async (req, res) => {
+app.get("/api/login-logs", auth, ownerOnly, async (req, res) => {
   const { page, size } = readPaging(req.query)
   const where = []
   const params = []
@@ -930,8 +1193,8 @@ app.get("/api/login-logs", auth, adminOnly, async (req, res) => {
   const [{ total }] = await query(`SELECT COUNT(*) AS total FROM login_logs l ${clause}`, params)
   const rows = await query(
     `SELECT l.id, l.username, l.success, l.reason, l.ip, l.user_agent AS device, l.login_at AS loginAt, l.logout_at AS logoutAt,
-       u.full_name AS name, u.role, EXISTS(SELECT 1 FROM sessions s WHERE s.login_log_id = l.id AND s.expires_at > NOW()) AS active
-     FROM login_logs l LEFT JOIN users u ON u.id = l.user_id ${clause} ORDER BY l.login_at DESC, l.id DESC LIMIT ? OFFSET ?`,
+       u.full_name AS name, r.name AS role, r.is_owner AS isOwner, EXISTS(SELECT 1 FROM sessions s WHERE s.login_log_id = l.id AND s.expires_at > NOW()) AS active
+     FROM login_logs l LEFT JOIN users u ON u.id = l.user_id LEFT JOIN roles r ON r.id = u.role_id ${clause} ORDER BY l.login_at DESC, l.id DESC LIMIT ? OFFSET ?`,
     [...params, size, (page - 1) * size],
   )
   res.json({ rows, total, page, size })

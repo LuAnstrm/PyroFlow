@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Check, ChevronRight, Download, Printer, RotateCcw, Search, X } from "lucide-react"
-import { api, downloadCsv, fmtDateTime, peso, useApp, useFetch, type PageParams, type Paged, type Sale } from "../lib"
+import { api, downloadCsv, fmtDateTime, paymentLabel, peso, useApp, useFetch, type PageParams, type Paged, type Sale } from "../lib"
 import { Badge, Button, Card, Empty, ErrorBox, Field, FormError, FormGroup, Loading, Modal, PageIntro, Pagination, Select } from "../ui"
 import { ReceiptDialog } from "./POS"
 
@@ -89,10 +89,21 @@ function SaleDialog({ saleId, onClose, onChanged }: { saleId: number; onClose: (
         <div>
           <span>Payment</span>
           <b>
-            {sale.method}
-            {sale.reference ? ` · ${sale.reference}` : ""}
+            {sale.method === "Cash" ? "Cash" : `${sale.method} · ${sale.provider ?? "not recorded"}`}
           </b>
         </div>
+        {sale.reference && (
+          <div>
+            <span>{sale.method === "Card" ? "Approval code" : "Reference no."}</span>
+            <b className="mono">{sale.reference}</b>
+          </div>
+        )}
+        {sale.payerAccount && (
+          <div>
+            <span>{sale.method === "Card" ? "Card no." : "Paid from"}</span>
+            <b>{sale.method === "Card" ? `**** ${sale.payerAccount}` : sale.payerAccount}</b>
+          </div>
+        )}
         {sale.method === "Cash" && (
           <div>
             <span>Cash / change</span>
@@ -106,6 +117,19 @@ function SaleDialog({ saleId, onClose, onChanged }: { saleId: number; onClose: (
         <span>Total</span>
         <strong>{peso(sale.total)}</strong>
       </div>
+      {sale.method !== "Cash" && (
+        <div className="proof-section">
+          <div>
+            <span>Proof of payment</span>
+            {sale.hasProof ? (
+              <a href={`/api/sales/${sale.id}/proof`} target="_blank" rel="noreferrer">
+                Open full size
+              </a>
+            ) : null}
+          </div>
+          {sale.hasProof ? <img className="proof-image" src={`/api/sales/${sale.id}/proof`} alt={`Proof of the ${paymentLabel(sale)} payment`} /> : <p className="form-note">No photo was added for this payment.</p>}
+        </div>
+      )}
       {refunding ? (
         <form onSubmit={refund} className="refund-form">
           <FormGroup label="Reason for refund" hint="The items go back into stock and the sale leaves your sales totals.">
@@ -149,6 +173,7 @@ export function Transactions({ params }: { params: PageParams }) {
   const [to, setTo] = useState(params.date ?? "")
   const [cashier, setCashier] = useState(params.cashier ? String(params.cashier) : "")
   const [method, setMethod] = useState("")
+  const { data: options } = useFetch<{ online: string[]; card: string[] }>("/payment-options")
   const [status, setStatus] = useState("")
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<number | null>(params.saleId ?? null)
@@ -164,7 +189,12 @@ export function Transactions({ params }: { params: PageParams }) {
   if (from) filter.set("from", from)
   if (to) filter.set("to", to)
   if (cashier) filter.set("cashier", cashier)
-  if (method) filter.set("method", method)
+  // "Online Payment|GCash" filters to one provider; "Card" alone to every card.
+  if (method) {
+    const [m, provider] = method.split("|")
+    filter.set("method", m)
+    if (provider) filter.set("provider", provider)
+  }
   if (status) filter.set("status", status)
   const filterText = filter.toString()
   const { data, error, loading, reload } = useFetch<Paged<Sale>>(`/sales?page=${page}&size=${PAGE_SIZE}&${filterText}`)
@@ -183,8 +213,8 @@ export function Transactions({ params }: { params: PageParams }) {
     try {
       const r = await api<Paged<Sale>>(`/sales?size=5000&${filterText}`)
       downloadCsv("transactions.csv", [
-        ["Transaction", "Date", "Cashier", "Items", "Subtotal", "Discount", "VAT", "Total", "Payment", "Reference", "Status"],
-        ...r.rows.map((s) => [s.txnNo, fmtDateTime(s.soldAt), s.cashier, s.units, s.subtotal, s.discountAmount, s.taxAmount, s.total, s.method, s.reference, s.status]),
+        ["Transaction", "Date", "Cashier", "Items", "Subtotal", "Discount", "VAT", "Total", "Payment method", "Paid with", "Reference / approval code", "Paid from / card", "Photo", "Status"],
+        ...r.rows.map((s) => [s.txnNo, fmtDateTime(s.soldAt), s.cashier, s.units, s.subtotal, s.discountAmount, s.taxAmount, s.total, s.method, s.provider, s.reference, s.payerAccount, s.hasProof ? "Yes" : "No", s.status]),
       ])
     } catch (e: any) {
       toast(e.message, "danger")
@@ -222,8 +252,22 @@ export function Transactions({ params }: { params: PageParams }) {
           <Select value={method} onChange={(e) => setMethod(e.target.value)} aria-label="Filter by payment method">
             <option value="">All payments</option>
             <option>Cash</option>
-            <option>Online Payment</option>
-            <option>Card</option>
+            <optgroup label="Online payment">
+              <option value="Online Payment">All online payments</option>
+              {options?.online.map((p) => (
+                <option key={p} value={`Online Payment|${p}`}>
+                  {p}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Card">
+              <option value="Card">All cards</option>
+              {options?.card.map((p) => (
+                <option key={p} value={`Card|${p}`}>
+                  {p}
+                </option>
+              ))}
+            </optgroup>
           </Select>
           <Select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by status">
             <option value="">All statuses</option>
@@ -266,7 +310,10 @@ export function Transactions({ params }: { params: PageParams }) {
                     <td>{fmtDateTime(s.soldAt)}</td>
                     <td>{s.cashier}</td>
                     <td className="num">{Number(s.units)}</td>
-                    <td>{s.method}</td>
+                    <td>
+                      {paymentLabel(s)}
+                      {s.reference && <small className="cell-sub">{s.reference}</small>}
+                    </td>
                     <td className="num">
                       <b>{peso(s.total)}</b>
                     </td>

@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 
-export type Role = "Administrator" | "Owner" | "Manager" | "Staff"
-export type Page = "dashboard" | "pos" | "inventory" | "forecast" | "transactions" | "reports" | "staff" | "accounts" | "security" | "settings"
+export type Page = "dashboard" | "pos" | "inventory" | "forecast" | "transactions" | "reports" | "staff" | "team" | "security" | "settings"
 export type Permission =
   | "sales.process"
   | "transactions.all"
@@ -15,7 +14,8 @@ export type Permission =
   | "reports.view"
   | "forecast.view"
   | "staff.operations"
-export type User = { id: number; name: string; username: string; role: Role; permissions: Permission[]; lastLoginAt: string | null; createdAt: string }
+/** role is null until the person joins the shop with an invite code. */
+export type User = { id: number; name: string; username: string; role: string | null; roleId: number | null; isOwner: boolean; permissions: Permission[]; lastLoginAt: string | null; createdAt: string }
 export type Product = {
   id: number
   name: string
@@ -40,9 +40,14 @@ export type Sale = {
   taxAmount: number
   total: number
   method: PaymentMethod
+  /** GCash, Maya, BDO, Visa, and so on. Empty for cash. */
+  provider: string | null
   tendered: number | null
   changeDue: number | null
   reference: string | null
+  /** Who paid online (name or number), or the last 4 digits of a card. */
+  payerAccount: string | null
+  hasProof: number | boolean
   status: "Completed" | "Refunded"
   refundedAt: string | null
   refundReason: string | null
@@ -155,7 +160,7 @@ export type AppContextValue = {
   logout: () => void
   /** Shapes what the screen offers. The server checks every permission again. */
   can: (permission: Permission) => boolean
-  isAdmin: boolean
+  isOwner: boolean
 }
 export const AppContext = createContext<AppContextValue | null>(null)
 export const useApp = () => useContext(AppContext)!
@@ -222,6 +227,9 @@ export function downloadCsv(filename: string, rows: (string | number | null | un
   a.click()
   URL.revokeObjectURL(url)
 }
+
+/** The payment by name: "GCash", "Visa card", or "Cash". Older sales without a provider show the method. */
+export const paymentLabel = (s: { method: PaymentMethod; provider: string | null }) => (!s.provider ? s.method : s.method === "Card" && !/card$/i.test(s.provider) ? `${s.provider} card` : s.provider)
 
 export function stockStatus(p: { stock: number; min: number }) {
   if (p.stock === 0) return { label: "Out of stock", tone: "danger" as const }
