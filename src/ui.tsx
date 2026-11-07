@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
-import { ArrowDownRight, ArrowUpRight, Box, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Flame, Loader2, Package, Rocket, Sparkles, Star, Wind, X, Zap } from "lucide-react"
+import { ArrowDownRight, ArrowUpRight, ChevronDown, ChevronLeft, ChevronRight, Loader2, Sparkles, X } from "lucide-react"
 import { fmtDateTime, initials, paymentLabel, peso, type Sale, type Settings } from "./lib"
+import { ProductArt } from "./productArt"
 
 export function Logo({ dark = false }: { dark?: boolean }) {
   return (
@@ -98,9 +99,69 @@ export function CardHead({ title, subtitle, action }: { title: string; subtitle?
   )
 }
 
+// Fixed star field and skyline for the page banners, so they look the same on every visit.
+const SKY_RAND = (() => {
+  let seed = 11
+  return () => {
+    seed = (seed * 16807) % 2147483647
+    return seed / 2147483647
+  }
+})()
+const HERO_STARS = Array.from({ length: 46 }, () => ({ x: SKY_RAND() * 1200, y: SKY_RAND() * 150, r: 0.6 + SKY_RAND() * 1.3, o: 0.3 + SKY_RAND() * 0.6 }))
+const HERO_CITY = (() => {
+  const blocks: { x: number; w: number; h: number; lit: [number, number][] }[] = []
+  let x = 0
+  while (x < 1200) {
+    const w = 22 + SKY_RAND() * 46
+    // taller towers towards the right, where the banner has free space
+    const h = 14 + SKY_RAND() * (x > 700 ? 62 : 34)
+    const lit: [number, number][] = []
+    for (let wy = 220 - h + 6; wy < 214; wy += 8) for (let wx = x + 4; wx < x + w - 5; wx += 7) if (SKY_RAND() < 0.16) lit.push([wx, wy])
+    blocks.push({ x, w, h, lit })
+    x += w + SKY_RAND() * 4
+  }
+  return blocks
+})()
+const HERO_BURSTS = [
+  { x: 1010, y: 62, r: 34, c: "#ffc233", d: "0s" },
+  { x: 1120, y: 36, r: 22, c: "#ff6b9a", d: "1.6s" },
+  { x: 880, y: 34, r: 16, c: "#4BB8FA", d: "3.1s" },
+]
+
+/** Night-sky decoration behind page banners: stars, a skyline and a few soft bursts. */
+export function HeroSky() {
+  return (
+    <svg className="hero-sky" viewBox="0 0 1200 220" preserveAspectRatio="xMaxYMax slice" aria-hidden="true">
+      {HERO_STARS.map((st, i) => (
+        <circle key={i} cx={st.x} cy={st.y} r={st.r} fill="#fff" opacity={st.o} />
+      ))}
+      {HERO_BURSTS.map((b) => (
+        <g key={b.x} className="hero-burst" style={{ animationDelay: b.d }}>
+          <circle cx={b.x} cy={b.y} r={b.r * 0.85} fill={b.c} opacity=".12" />
+          {Array.from({ length: 14 }, (_, i) => {
+            const a = (i / 14) * Math.PI * 2
+            const len = i % 2 ? b.r * 0.62 : b.r
+            return <line key={i} x1={b.x + Math.cos(a) * b.r * 0.25} y1={b.y + Math.sin(a) * b.r * 0.25} x2={b.x + Math.cos(a) * len} y2={b.y + Math.sin(a) * len} stroke={b.c} strokeWidth="2" strokeLinecap="round" />
+          })}
+          <circle cx={b.x} cy={b.y} r="2.4" fill="#fff" />
+        </g>
+      ))}
+      {HERO_CITY.map((bl) => (
+        <g key={bl.x}>
+          <rect x={bl.x} y={220 - bl.h} width={bl.w} height={bl.h} fill="#061430" opacity=".78" />
+          {bl.lit.map(([wx, wy]) => (
+            <rect key={wx + "-" + wy} x={wx} y={wy} width="2.6" height="3.2" fill="#ffd98a" opacity=".55" />
+          ))}
+        </g>
+      ))}
+    </svg>
+  )
+}
+
 export function PageIntro({ eyebrow, title, subtitle, children }: { eyebrow: string; title: string; subtitle: string; children?: React.ReactNode }) {
   return (
     <div className="page-intro">
+      <HeroSky />
       <div>
         <span className="eyebrow">{eyebrow}</span>
         <h1>{title}</h1>
@@ -291,21 +352,11 @@ export function Avatar({ name, large }: { name: string; large?: boolean }) {
   return <div className={`avatar ${large ? "avatar-lg" : ""}`}>{initials(name)}</div>
 }
 
-const CATEGORY_STYLE: Record<string, [React.ElementType, string]> = {
-  Rockets: [Rocket, "t1"],
-  "Roman Candles": [Flame, "t2"],
-  Sparklers: [Sparkles, "t3"],
-  Fountains: [Wind, "t4"],
-  "Aerial Fireworks": [Star, "t5"],
-  "Ground Fireworks": [CircleDot, "t6"],
-  "Assorted Fireworks": [Package, "t7"],
-  Firecrackers: [Zap, "t8"],
-}
-export function ProductTile({ category, size = 42 }: { category: string; size?: number }) {
-  const [Icon, tone] = CATEGORY_STYLE[category] ?? [Box, "t0"]
+/** Small rounded product picture for tables, lists and the cart. */
+export function ProductTile({ category, name, size = 42 }: { category: string; name?: string; size?: number }) {
   return (
-    <div className={`product-tile ${tone}`} style={{ width: size, height: size }}>
-      <Icon size={size * 0.48} />
+    <div className="product-tile" style={{ width: size, height: size }}>
+      <ProductArt name={name ?? category} category={category} />
     </div>
   )
 }

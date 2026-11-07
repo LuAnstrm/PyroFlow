@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { fmtDay, fmtDayLong, fmtMonth, peso0, pesoShort, type ForecastPoint, type HistoryPoint } from "./lib"
 
-export const SERIES = { actual: "#2f6fb3", forecast: "#e8590c", third: "#0f9d8a", fourth: "#c98a00" }
+export const SERIES = { actual: "#2C5EAD", forecast: "#BC0202", third: "#1591DC", fourth: "#c98a00" }
 
 function useWidth() {
   const ref = useRef<HTMLDivElement>(null)

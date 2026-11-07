@@ -340,7 +340,7 @@ export function Inventory({ params }: { params: PageParams }) {
                     <tr key={p.id}>
                       <td>
                         <div className="table-product">
-                          <ProductTile category={p.category} size={38} />
+                          <ProductTile category={p.category} name={p.name} size={38} />
                           <span>
                             <b>{p.name}</b>
                             <small>

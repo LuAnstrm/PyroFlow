@@ -38,18 +38,20 @@ import { SettingsPage } from "./pages/Settings"
 import { StaffOperations } from "./pages/StaffOperations"
 
 type Can = AppContextValue["can"]
-const NAV: { id: Page; label: string; icon: React.ElementType; show: (can: Can, isOwner: boolean) => boolean }[] = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: () => true },
-  { id: "pos", label: "Point of Sale", icon: ShoppingCart, show: (can) => can("sales.process") },
-  { id: "inventory", label: "Inventory", icon: Boxes, show: (can) => can("inventory.view") },
-  { id: "forecast", label: "Sales Forecasting", icon: TrendingUp, show: (can) => can("forecast.view") },
-  { id: "transactions", label: "Transactions", icon: ReceiptText, show: (can) => can("transactions.all") || can("sales.process") },
-  { id: "reports", label: "Reports & Analytics", icon: FileBarChart, show: (can) => can("reports.view") },
-  { id: "staff", label: "Staff Operations", icon: Users, show: (can) => can("staff.operations") },
-  { id: "team", label: "Team & Roles", icon: ShieldCheck, show: (_can, isOwner) => isOwner },
-  { id: "security", label: "Security", icon: KeyRound, show: (_can, isOwner) => isOwner },
-  { id: "settings", label: "Settings", icon: SettingsIcon, show: () => true },
+type NavGroup = "Overview" | "Selling" | "Stock & insights" | "Manage"
+const NAV: { id: Page; label: string; icon: React.ElementType; group: NavGroup; show: (can: Can, isOwner: boolean) => boolean }[] = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, group: "Overview", show: () => true },
+  { id: "pos", label: "Point of Sale", icon: ShoppingCart, group: "Selling", show: (can) => can("sales.process") },
+  { id: "transactions", label: "Transactions", icon: ReceiptText, group: "Selling", show: (can) => can("transactions.all") || can("sales.process") },
+  { id: "inventory", label: "Inventory", icon: Boxes, group: "Stock & insights", show: (can) => can("inventory.view") },
+  { id: "forecast", label: "Sales Forecasting", icon: TrendingUp, group: "Stock & insights", show: (can) => can("forecast.view") },
+  { id: "reports", label: "Reports & Analytics", icon: FileBarChart, group: "Stock & insights", show: (can) => can("reports.view") },
+  { id: "staff", label: "Staff Operations", icon: Users, group: "Manage", show: (can) => can("staff.operations") },
+  { id: "team", label: "Team & Roles", icon: ShieldCheck, group: "Manage", show: (_can, isOwner) => isOwner },
+  { id: "security", label: "Security", icon: KeyRound, group: "Manage", show: (_can, isOwner) => isOwner },
+  { id: "settings", label: "Settings", icon: SettingsIcon, group: "Manage", show: () => true },
 ]
+const TODAY_FMT = new Intl.DateTimeFormat("en-PH", { weekday: "long", month: "long", day: "numeric", year: "numeric" })
 
 function usePopover() {
   const [open, setOpen] = useState(false)
@@ -77,7 +79,7 @@ function Notifications({ alerts, go, canRestock, isOwner }: { alerts: Alerts; go
   const count = alerts.enabled ? alerts.items.length : 0
   const row = (a: Alerts["items"][number]) => (
     <div className="notif-row" key={a.id}>
-      <ProductTile category={a.category} size={36} />
+      <ProductTile category={a.category} name={a.name} size={40} />
       <div>
         <strong>{a.name}</strong>
         <span>
@@ -213,20 +215,21 @@ function ProfileMenu({ user, go, logout, isOwner }: { user: User; go: AppContext
 
 function SearchDialog({ onClose, go }: { onClose: () => void; go: AppContextValue["go"] }) {
   const [q, setQ] = useState("")
-  const [results, setResults] = useState<{ products: Product[]; sales: Sale[] }>({ products: [], sales: [] })
+  // "for" remembers which search these results answer, so "nothing matches" only shows once they arrive.
+  const [results, setResults] = useState<{ for: string; products: Product[]; sales: Sale[] }>({ for: "", products: [], sales: [] })
   useEffect(() => {
     if (!q.trim()) {
-      setResults({ products: [], sales: [] })
+      setResults({ for: "", products: [], sales: [] })
       return
     }
     const t = setTimeout(() => {
-      api(`/search?q=${encodeURIComponent(q)}`)
-        .then(setResults)
+      api<{ products: Product[]; sales: Sale[] }>(`/search?q=${encodeURIComponent(q)}`)
+        .then((r) => setResults({ for: q, ...r }))
         .catch(() => {})
     }, 200)
     return () => clearTimeout(t)
   }, [q])
-  const nothing = q.trim() && !results.products.length && !results.sales.length
+  const nothing = q.trim() && results.for === q && !results.products.length && !results.sales.length
   return (
     <Modal title="Search" onClose={onClose} width={520}>
       <Field icon={Search} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Product name, SKU, category or transaction no." />
@@ -241,7 +244,7 @@ function SearchDialog({ onClose, go }: { onClose: () => void; go: AppContextValu
               go("inventory", { search: p.sku })
             }}
           >
-            <ProductTile category={p.category} size={34} />
+            <ProductTile category={p.category} name={p.name} size={38} />
             <span>
               <b>{p.name}</b>
               <small>
@@ -356,6 +359,17 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
     return () => window.removeEventListener("hashchange", onHash)
   }, [allowed])
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault()
+        setSearch(true)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
+
   const toast = useCallback<AppContextValue["toast"]>((message, tone = "success") => {
     const id = Date.now() + Math.random()
     setToasts((t) => [...t, { id, message, tone }])
@@ -428,12 +442,15 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
             </div>
           </div>
           <nav>
-            {nav.map((item) => (
-              <button type="button" key={item.id} className={page === item.id ? "active" : ""} onClick={() => go(item.id)}>
-                <item.icon size={19} />
-                <span>{item.label}</span>
-                {item.id === "inventory" && alertCount > 0 && <b>{alertCount}</b>}
-              </button>
+            {nav.map((item, i) => (
+              <div key={item.id} className="nav-item-wrap">
+                {nav[i - 1]?.group !== item.group && <p className="nav-group">{item.group}</p>}
+                <button type="button" className={page === item.id ? "active" : ""} aria-current={page === item.id ? "page" : undefined} onClick={() => go(item.id)}>
+                  <item.icon size={19} />
+                  <span>{item.label}</span>
+                  {item.id === "inventory" && alertCount > 0 && <b>{alertCount}</b>}
+                </button>
+              </div>
             ))}
           </nav>
           <button type="button" className="sidebar-help" onClick={() => setHelp(true)}>
@@ -453,17 +470,22 @@ export function Shell({ user, setUser, onLoggedOut }: { user: User; setUser: (u:
               <button type="button" className="menu-button" onClick={() => setSidebar(true)} aria-label="Open menu">
                 <Menu size={22} />
               </button>
-              <h2>{NAV.find((n) => n.id === page)?.label}</h2>
+              <div className="topbar-heading">
+                <h2>{NAV.find((n) => n.id === page)?.label}</h2>
+                <small>{TODAY_FMT.format(new Date())}</small>
+              </div>
             </div>
             <div className="topbar-actions">
-              <button type="button" className="icon-button" onClick={() => setSearch(true)} aria-label="Search">
-                <Search size={19} />
+              <button type="button" className="search-pill" onClick={() => setSearch(true)} aria-label="Search">
+                <Search size={17} />
+                <span>Search…</span>
+                <kbd>Ctrl K</kbd>
               </button>
               {can("inventory.view") && <Notifications alerts={alerts} go={go} canRestock={can("inventory.manage")} isOwner={isOwner} />}
               <ProfileMenu user={user} go={go} logout={logout} isOwner={isOwner} />
             </div>
           </header>
-          <main className={`main-content ${page === "pos" ? "pos-content" : ""}`}>
+          <main key={page} className={`main-content ${page === "pos" ? "pos-content" : ""}`}>
             {page === "dashboard" && <Dashboard />}
             {page === "pos" && <POS cart={cart} setCart={setCart} />}
             {page === "inventory" && <Inventory key={paramKey} params={params} />}
